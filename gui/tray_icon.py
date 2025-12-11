@@ -4,9 +4,10 @@
 from PyQt5.QtWidgets import QSystemTrayIcon, QMenu, QApplication, QWidget
 from PyQt5.QtGui import QIcon, QPainter, QColor, QBrush, QPen, QFont, QPixmap
 from PyQt5.QtCore import QSize, Qt, pyqtSignal, QObject
-from gui import SettingsWindow
-from backup_manager import BackupManager
-from config_manager import ConfigManager
+from gui.settings_window import SettingsWindow
+from core.backup_manager import BackupManager
+from core.config_manager import ConfigManager
+
 
 class TrayIcon(QObject):
     """Класс для работы с иконкой в системном трее"""
@@ -135,3 +136,4 @@ class TrayIcon(QObject):
     def show_message(self, title, message, duration=3000):
         """Показать сообщение из трея"""
         self.tray_icon.showMessage(title, message, QSystemTrayIcon.Information, duration)
+

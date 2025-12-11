@@ -9,8 +9,10 @@ from pathlib import Path
 from datetime import datetime
 from typing import List, Dict, Any
 import fnmatch
-from config_manager import ConfigManager
-from logger import setup_logger
+
+
+from core.config_manager import ConfigManager
+from core.logger import setup_logger
 
 logger = setup_logger()
 
@@ -240,21 +242,32 @@ class BackupManager:
     
     def _should_delete(self, file_path: Path, rule: Dict[str, Any]) -> bool:
         """Проверить, нужно ли удалять файл согласно правилу"""
-        max_age_days = rule.get("max_age_days", 30)
+        # Поддержка старого формата для обратной совместимости
+        if "max_age_days" in rule:
+            max_age_minutes = rule.get("max_age_days", 30) * 24 * 60
+        else:
+            max_age_minutes = rule.get("max_age_minutes", 43200)  # По умолчанию 30 дней
         
         try:
             # Получаем время модификации файла
             mtime = file_path.stat().st_mtime
             file_age = datetime.now() - datetime.fromtimestamp(mtime)
             
-            return file_age.days >= max_age_days
+            # Преобразуем возраст в минуты
+            file_age_minutes = file_age.total_seconds() / 60
+            
+            return file_age_minutes >= max_age_minutes
         except Exception:
             return False
     
     def start_monitoring(self):
         """Запустить мониторинг в фоновом режиме"""
         self.running = True
-        check_interval = self.config.config.get("check_interval_seconds", 3600)
+        # Поддержка старого формата для обратной совместимости
+        if "check_interval_seconds" in self.config.config:
+            check_interval = self.config.config.get("check_interval_seconds", 3600)
+        else:
+            check_interval = self.config.config.get("check_interval_minutes", 60) * 60
         
         def monitor_loop():
             while self.running:

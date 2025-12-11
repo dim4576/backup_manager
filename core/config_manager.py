@@ -6,7 +6,7 @@ import sys
 import os
 from pathlib import Path
 from typing import List, Dict, Any
-from logger import setup_logger
+from core.logger import setup_logger
 
 # Импорт для работы с реестром Windows
 try:
@@ -26,17 +26,17 @@ class ConfigManager:
         "watch_folders": [],
         "rules": [
             {
-                "name": "Удалить файлы старше 30 дней",
+                "name": "Удалить файлы старше 43200 минут (30 дней)",
                 "pattern": "*",
                 "pattern_type": "wildcard",  # "wildcard" или "regex"
-                "max_age_days": 30,
+                "max_age_minutes": 43200,  # 30 дней = 30 * 24 * 60 минут
                 "enabled": True,
                 "folders": [],  # Пустой список означает "ничего не выбрано"
                 "keep_latest": 0,  # Сколько самых свежих объектов оставить (0 = оставить все подходящие)
                 "permanent_delete": False  # False = удалять в корзину, True = удалять навсегда
             }
         ],
-        "check_interval_seconds": 3600,  # Проверка каждый час
+        "check_interval_minutes": 60,  # Проверка каждые 60 минут (1 час)
         "auto_start": False
     }
     
@@ -82,7 +82,7 @@ class ConfigManager:
             return sys.executable
         else:
             # Проверяем наличие launcher.pyw (запуск без консоли)
-            launcher_path = Path(__file__).parent / "launcher.pyw"
+            launcher_path = Path(__file__).parent.parent / "launcher.pyw"
             if launcher_path.exists():
                 # Используем pythonw.exe для запуска .pyw файла
                 python_exe = sys.executable
@@ -100,7 +100,7 @@ class ConfigManager:
                 return f'"{python_exe}" "{launcher_path}"'
             else:
                 # Если launcher.pyw нет, используем pythonw.exe с main.py
-                script_path = Path(__file__).parent / "main.py"
+                script_path = Path(__file__).parent.parent / "main.py"
                 python_exe = sys.executable
                 if python_exe.endswith('python.exe'):
                     python_exe = python_exe.replace('python.exe', 'pythonw.exe')
@@ -194,5 +194,4 @@ class ConfigManager:
             rules.pop(index)
             self.config["rules"] = rules
             self.save_config()
-
 

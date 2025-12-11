@@ -3,9 +3,9 @@ Backup Manager - Менеджер автоматического удалени�
 """
 import sys
 from PyQt5.QtWidgets import QApplication
-from backup_manager import BackupManager
-from tray_icon import TrayIcon
-from config_manager import ConfigManager
+from core.backup_manager import BackupManager
+from gui.tray_icon import TrayIcon
+from core.config_manager import ConfigManager
 
 def main():
     """Главная функция запуска приложения"""
