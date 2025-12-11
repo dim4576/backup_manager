@@ -265,19 +265,39 @@ class BackupManager:
         self.running = True
         # Поддержка старого формата для обратной совместимости
         if "check_interval_seconds" in self.config.config:
-            check_interval = self.config.config.get("check_interval_seconds", 3600)
+            check_interval_seconds = self.config.config.get("check_interval_seconds", 3600)
+            check_interval_minutes = check_interval_seconds / 60
         else:
-            check_interval = self.config.config.get("check_interval_minutes", 60) * 60
+            check_interval_minutes = self.config.config.get("check_interval_minutes", 60)
+            check_interval_seconds = check_interval_minutes * 60
+        
+        logger.info(f"Запуск мониторинга с интервалом проверки: {check_interval_minutes} минут ({check_interval_seconds} секунд)")
         
         def monitor_loop():
+            iteration = 0
             while self.running:
-                self.scan_and_clean()
-                time.sleep(check_interval)
+                iteration += 1
+                logger.info(f"Начало проверки #{iteration} (интервал: {check_interval_minutes} минут)")
+                try:
+                    results = self.scan_and_clean()
+                    logger.info(f"Проверка #{iteration} завершена. Удалено: {len(results['deleted'])}, ошибок: {len(results['errors'])}, проверено: {results['total_scanned']}")
+                except Exception as e:
+                    logger.error(f"Ошибка при выполнении проверки #{iteration}: {e}", exc_info=True)
+                
+                if self.running:
+                    logger.info(f"Ожидание {check_interval_minutes} минут до следующей проверки...")
+                    time.sleep(check_interval_seconds)
         
         thread = threading.Thread(target=monitor_loop, daemon=True)
         thread.start()
+        logger.info("Поток мониторинга запущен")
     
     def stop_monitoring(self):
         """Остановить мониторинг"""
-        self.running = False
+        if self.running:
+            logger.info("Остановка мониторинга...")
+            self.running = False
+            # Даём время потоку завершиться
+            time.sleep(0.5)
+            logger.info("Мониторинг остановлен")
 

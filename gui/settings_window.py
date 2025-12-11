@@ -336,6 +336,8 @@ class SettingsWindow(QDialog):
     def _save_general_settings(self):
         """Сохранить общие настройки"""
         minutes = self.interval_spin.value()
+        old_minutes = self.config.config.get("check_interval_minutes", 60)
+        
         self.config.config["check_interval_minutes"] = minutes
         # Удаляем старый формат если есть
         if "check_interval_seconds" in self.config.config:
@@ -344,7 +346,14 @@ class SettingsWindow(QDialog):
         
         try:
             self.config.save_config()
-            message = "Настройки сохранены"
+            
+            # Если интервал изменился, перезапускаем мониторинг
+            if old_minutes != minutes:
+                self.backup_manager.stop_monitoring()
+                # Перезапускаем мониторинг с новым интервалом
+                self.backup_manager.start_monitoring()
+            
+            message = f"Настройки сохранены\nИнтервал проверки: {minutes} минут"
             if self.config.config["auto_start"]:
                 message += "\nАвтозапуск включен. Приложение будет запускаться при старте Windows."
             else:
