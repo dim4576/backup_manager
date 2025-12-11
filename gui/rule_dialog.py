@@ -70,12 +70,24 @@ class RuleDialog(QDialog):
         # Обновляем подсказку при загрузке
         self._on_pattern_type_changed()
         
-        # Максимальный возраст (дни, часы, минуты)
+        # Максимальный возраст (годы, месяцы, дни, часы, минуты)
         age_layout = QHBoxLayout()
+        
+        # Годы
+        self.years_spin = QSpinBox()
+        self.years_spin.setRange(0, 100)
+        self.years_spin.setSuffix(" г.")
+        age_layout.addWidget(self.years_spin)
+        
+        # Месяцы
+        self.months_spin = QSpinBox()
+        self.months_spin.setRange(0, 11)
+        self.months_spin.setSuffix(" мес.")
+        age_layout.addWidget(self.months_spin)
         
         # Дни
         self.days_spin = QSpinBox()
-        self.days_spin.setRange(0, 365)
+        self.days_spin.setRange(0, 30)
         self.days_spin.setSuffix(" дн.")
         age_layout.addWidget(self.days_spin)
         
@@ -100,12 +112,19 @@ class RuleDialog(QDialog):
         else:
             total_minutes = rule.get("max_age_minutes", 43200)  # По умолчанию 30 дней
         
-        # Конвертируем минуты в дни, часы, минуты
-        days = total_minutes // (24 * 60)
-        remaining_minutes = total_minutes % (24 * 60)
+        # Конвертируем минуты в годы, месяцы, дни, часы, минуты
+        # 1 год = 365 дней, 1 месяц = 30 дней
+        years = total_minutes // (365 * 24 * 60)
+        remaining_after_years = total_minutes % (365 * 24 * 60)
+        months = remaining_after_years // (30 * 24 * 60)
+        remaining_after_months = remaining_after_years % (30 * 24 * 60)
+        days = remaining_after_months // (24 * 60)
+        remaining_minutes = remaining_after_months % (24 * 60)
         hours = remaining_minutes // 60
         minutes = remaining_minutes % 60
         
+        self.years_spin.setValue(years)
+        self.months_spin.setValue(months)
         self.days_spin.setValue(days)
         self.hours_spin.setValue(hours)
         self.minutes_spin.setValue(minutes)
@@ -113,7 +132,7 @@ class RuleDialog(QDialog):
         form_layout.addRow("Удалять файлы старше:", age_layout)
         
         # Подсказка
-        age_hint = QLabel("(укажите дни, часы и/или минуты. Например: 7 дн. 0 ч. 0 мин. = 7 дней)")
+        age_hint = QLabel("(укажите годы, месяцы, дни, часы и/или минуты. Например: 1 г. 2 мес. 7 дн. = 1 год 2 месяца 7 дней)")
         age_hint.setStyleSheet("color: gray; font-size: 9pt;")
         form_layout.addRow("", age_hint)
         
@@ -266,14 +285,17 @@ class RuleDialog(QDialog):
                 QMessageBox.warning(self, "Ошибка", f"Некорректное регулярное выражение: {e}")
                 return
         
-        # Конвертируем дни, часы, минуты в общее количество минут
-        total_minutes = (self.days_spin.value() * 24 * 60 + 
+        # Конвертируем годы, месяцы, дни, часы, минуты в общее количество минут
+        # 1 год = 365 дней, 1 месяц = 30 дней
+        total_minutes = (self.years_spin.value() * 365 * 24 * 60 +
+                        self.months_spin.value() * 30 * 24 * 60 +
+                        self.days_spin.value() * 24 * 60 + 
                         self.hours_spin.value() * 60 + 
                         self.minutes_spin.value())
         
         # Проверяем, что хотя бы одно значение задано
         if total_minutes == 0:
-            QMessageBox.warning(self, "Предупреждение", "Укажите возраст файлов для удаления (дни, часы или минуты)")
+            QMessageBox.warning(self, "Предупреждение", "Укажите возраст файлов для удаления (годы, месяцы, дни, часы или минуты)")
             return
         
         rule = {

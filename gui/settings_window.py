@@ -283,13 +283,22 @@ class SettingsWindow(QDialog):
             else:
                 age_minutes = rule.get("max_age_minutes", 43200)
             
-            # Форматируем возраст в удобочитаемый вид (дни, часы, минуты)
-            days = age_minutes // (24 * 60)
-            remaining_minutes = age_minutes % (24 * 60)
+            # Форматируем возраст в удобочитаемый вид (годы, месяцы, дни, часы, минуты)
+            # 1 год = 365 дней, 1 месяц = 30 дней
+            years = age_minutes // (365 * 24 * 60)
+            remaining_after_years = age_minutes % (365 * 24 * 60)
+            months = remaining_after_years // (30 * 24 * 60)
+            remaining_after_months = remaining_after_years % (30 * 24 * 60)
+            days = remaining_after_months // (24 * 60)
+            remaining_minutes = remaining_after_months % (24 * 60)
             hours = remaining_minutes // 60
             minutes = remaining_minutes % 60
             
             age_str_parts = []
+            if years > 0:
+                age_str_parts.append(f"{years} г.")
+            if months > 0:
+                age_str_parts.append(f"{months} мес.")
             if days > 0:
                 age_str_parts.append(f"{days} дн.")
             if hours > 0:
