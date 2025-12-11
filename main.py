@@ -7,7 +7,7 @@ import os
 def main():
     """Главная функция запуска приложения"""
     # Проверяем, есть ли переменная окружения для режима сервера
-    if os.getenv('BACKUP_MANAGER_SERVER_MODE') == '1' or '--server' in sys.argv:
+    if os.environ.get('BACKUP_MANAGER_SERVER_MODE') == '1' or '--server' in sys.argv:
         # Запускаем в режиме сервера без GUI
         from server_mode import main as server_main
         server_main()
@@ -18,7 +18,6 @@ def main():
         # Пытаемся настроить пути к плагинам Qt перед импортом
         try:
             import PyQt5
-            import os
             from pathlib import Path
             
             # Ищем плагины Qt
