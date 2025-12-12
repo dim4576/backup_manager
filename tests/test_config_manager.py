@@ -296,6 +296,181 @@ class TestConfigManager(unittest.TestCase):
         with patch.object(config, '_set_autostart') as mock_set:
             config.sync_autostart()
             mock_set.assert_called_once_with(True)
+    
+    def test_schedules_config_structure(self):
+        """Тест структуры конфигурации расписаний"""
+        config = ConfigManager()
+        
+        input_data = {
+            "config_keys": list(config.config.keys())
+        }
+        
+        result = {
+            "has_schedule_enabled": "schedule_enabled" in config.config,
+            "has_schedules": "schedules" in config.config,
+            "schedules_is_list": isinstance(config.config.get("schedules", None), list),
+            "schedules_count": len(config.config.get("schedules", []))
+        }
+        
+        expected = {
+            "has_schedule_enabled": True,
+            "has_schedules": True,
+            "schedules_is_list": True,
+            "schedules_count": 1  # Должно быть хотя бы одно дефолтное расписание
+        }
+        
+        print_test_info("Структура конфигурации расписаний", input_data, result, expected)
+        
+        self.assertIn("schedule_enabled", config.config)
+        self.assertIn("schedules", config.config)
+        self.assertIsInstance(config.config["schedules"], list)
+        self.assertGreater(len(config.config["schedules"]), 0)
+    
+    def test_schedules_default_values(self):
+        """Тест дефолтных значений расписаний"""
+        config = ConfigManager()
+        
+        input_data = {
+            "schedule_enabled": config.config.get("schedule_enabled"),
+            "schedules": config.config.get("schedules", [])
+        }
+        
+        result = {
+            "schedule_enabled": config.config.get("schedule_enabled"),
+            "schedules_count": len(config.config.get("schedules", [])),
+            "first_schedule": config.config.get("schedules", [{}])[0] if config.config.get("schedules") else {}
+        }
+        
+        expected = {
+            "schedule_enabled": False,
+            "schedules_count": 1,
+            "first_schedule": {
+                "days": [0, 1, 2, 3, 4, 5, 6],
+                "time": "00:00"
+            }
+        }
+        
+        print_test_info("Дефолтные значения расписаний", input_data, result, expected)
+        
+        self.assertFalse(config.config.get("schedule_enabled", True))
+        schedules = config.config.get("schedules", [])
+        self.assertGreater(len(schedules), 0)
+        first_schedule = schedules[0]
+        self.assertIn("days", first_schedule)
+        self.assertIn("time", first_schedule)
+        self.assertEqual(first_schedule["time"], "00:00")
+    
+    def test_schedules_save_and_load(self):
+        """Тест сохранения и загрузки расписаний"""
+        config = ConfigManager()
+        config.config["schedule_enabled"] = True
+        config.config["schedules"] = [
+            {
+                "days": [0, 1, 2],  # Пн, Вт, Ср
+                "time": "10:00"
+            },
+            {
+                "days": [5, 6],  # Сб, Вс
+                "time": "20:00"
+            }
+        ]
+        
+        input_data = {
+            "schedule_enabled": True,
+            "schedules_count": 2,
+            "schedules": config.config["schedules"]
+        }
+        
+        config.save_config()
+        
+        # Загружаем заново
+        new_config = ConfigManager()
+        
+        result = {
+            "schedule_enabled": new_config.config.get("schedule_enabled"),
+            "schedules_count": len(new_config.config.get("schedules", [])),
+            "first_schedule": new_config.config.get("schedules", [{}])[0] if new_config.config.get("schedules") else {},
+            "second_schedule": new_config.config.get("schedules", [{}])[1] if len(new_config.config.get("schedules", [])) > 1 else {}
+        }
+        
+        expected = {
+            "schedule_enabled": True,
+            "schedules_count": 2,
+            "first_schedule": {
+                "days": [0, 1, 2],
+                "time": "10:00"
+            },
+            "second_schedule": {
+                "days": [5, 6],
+                "time": "20:00"
+            }
+        }
+        
+        print_test_info("Сохранение и загрузка расписаний", input_data, result, expected)
+        
+        self.assertTrue(new_config.config.get("schedule_enabled"))
+        schedules = new_config.config.get("schedules", [])
+        self.assertEqual(len(schedules), 2)
+        self.assertEqual(schedules[0]["days"], [0, 1, 2])
+        self.assertEqual(schedules[0]["time"], "10:00")
+        self.assertEqual(schedules[1]["days"], [5, 6])
+        self.assertEqual(schedules[1]["time"], "20:00")
+    
+    def test_schedules_migration_from_old_format(self):
+        """Тест миграции старого формата расписания"""
+        # Создаём конфиг со старым форматом
+        old_config = {
+            "watch_folders": [],
+            "rules": [],
+            "check_interval_minutes": 60,
+            "auto_start": False,
+            "schedule": {
+                "enabled": True,
+                "days": [0, 1, 2],
+                "time": "15:30"
+            }
+        }
+        
+        self.config_file.parent.mkdir(parents=True, exist_ok=True)
+        with open(self.config_file, 'w', encoding='utf-8') as f:
+            yaml.dump(old_config, f)
+        
+        input_data = {
+            "old_config": old_config
+        }
+        
+        # Загружаем конфиг (должна произойти миграция)
+        config = ConfigManager()
+        
+        result = {
+            "has_schedule_enabled": "schedule_enabled" in config.config,
+            "has_schedules": "schedules" in config.config,
+            "schedule_enabled": config.config.get("schedule_enabled"),
+            "schedules_count": len(config.config.get("schedules", [])),
+            "first_schedule": config.config.get("schedules", [{}])[0] if config.config.get("schedules") else {}
+        }
+        
+        expected = {
+            "has_schedule_enabled": True,
+            "has_schedules": True,
+            "schedule_enabled": True,
+            "schedules_count": 1,
+            "first_schedule": {
+                "days": [0, 1, 2],
+                "time": "15:30"
+            }
+        }
+        
+        print_test_info("Миграция старого формата расписания", input_data, result, expected)
+        
+        # Проверяем, что миграция произошла
+        self.assertIn("schedule_enabled", config.config)
+        self.assertIn("schedules", config.config)
+        self.assertTrue(config.config.get("schedule_enabled"))
+        schedules = config.config.get("schedules", [])
+        self.assertEqual(len(schedules), 1)
+        self.assertEqual(schedules[0]["days"], [0, 1, 2])
+        self.assertEqual(schedules[0]["time"], "15:30")
 
 
 if __name__ == '__main__':

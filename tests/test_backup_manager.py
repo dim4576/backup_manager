@@ -416,6 +416,215 @@ class TestBackupManager(unittest.TestCase):
             # Должно быть удалено 3 файла (5 - 2 = 3)
             self.assertEqual(mock_delete.call_count, 3)
             self.assertEqual(results["total_scanned"], 5)
+    
+    def test_check_schedule_disabled(self):
+        """Тест проверки расписания когда оно отключено"""
+        self.config.config["schedule_enabled"] = False
+        
+        input_data = {
+            "schedule_enabled": False,
+            "check_interval_minutes": 60
+        }
+        
+        result = self.backup_manager._check_schedule(60)
+        
+        print_test_info("Проверка расписания (отключено)", input_data, {"result": result}, {"result": True})
+        
+        self.assertTrue(result)  # Когда расписание отключено, всегда разрешаем сканирование
+    
+    def test_check_schedule_enabled_no_schedules(self):
+        """Тест проверки расписания когда оно включено, но расписаний нет"""
+        self.config.config["schedule_enabled"] = True
+        self.config.config["schedules"] = []
+        
+        result = self.backup_manager._check_schedule(60)
+        
+        self.assertTrue(result)  # Если расписаний нет, разрешаем сканирование
+    
+    def test_check_schedule_enabled_matching_day_and_time(self):
+        """Тест проверки расписания когда день и время совпадают"""
+        now = datetime.now()
+        current_day = now.weekday()  # 0=понедельник, 6=воскресенье
+        current_time = now.strftime("%H:%M")
+        
+        self.config.config["schedule_enabled"] = True
+        self.config.config["schedules"] = [
+            {
+                "days": [current_day],
+                "time": current_time
+            }
+        ]
+        
+        input_data = {
+            "schedule_enabled": True,
+            "current_day": current_day,
+            "current_time": current_time,
+            "schedule": self.config.config["schedules"][0],
+            "check_interval_minutes": 60
+        }
+        
+        result = self.backup_manager._check_schedule(60)
+        
+        print_test_info("Проверка расписания (совпадение дня и времени)", input_data, {"result": result}, {"result": True})
+        
+        self.assertTrue(result)
+    
+    def test_check_schedule_enabled_wrong_day(self):
+        """Тест проверки расписания когда день не совпадает"""
+        now = datetime.now()
+        current_day = now.weekday()
+        wrong_day = (current_day + 1) % 7  # Следующий день
+        current_time = now.strftime("%H:%M")
+        
+        self.config.config["schedule_enabled"] = True
+        self.config.config["schedules"] = [
+            {
+                "days": [wrong_day],
+                "time": current_time
+            }
+        ]
+        
+        input_data = {
+            "schedule_enabled": True,
+            "current_day": current_day,
+            "wrong_day": wrong_day,
+            "current_time": current_time,
+            "schedule": self.config.config["schedules"][0],
+            "check_interval_minutes": 60
+        }
+        
+        result = self.backup_manager._check_schedule(60)
+        
+        print_test_info("Проверка расписания (неправильный день)", input_data, {"result": result}, {"result": False})
+        
+        self.assertFalse(result)
+    
+    def test_check_schedule_enabled_wrong_time(self):
+        """Тест проверки расписания когда время не совпадает"""
+        now = datetime.now()
+        current_day = now.weekday()
+        # Устанавливаем время на час вперед
+        future_time = (now + timedelta(hours=1)).strftime("%H:%M")
+        
+        self.config.config["schedule_enabled"] = True
+        self.config.config["schedules"] = [
+            {
+                "days": [current_day],
+                "time": future_time
+            }
+        ]
+        
+        input_data = {
+            "schedule_enabled": True,
+            "current_day": current_day,
+            "current_time": now.strftime("%H:%M"),
+            "schedule_time": future_time,
+            "schedule": self.config.config["schedules"][0],
+            "check_interval_minutes": 60
+        }
+        
+        result = self.backup_manager._check_schedule(60)
+        
+        print_test_info("Проверка расписания (неправильное время)", input_data, {"result": result}, {"result": False})
+        
+        self.assertFalse(result)
+    
+    def test_check_schedule_multiple_schedules_one_matches(self):
+        """Тест проверки расписания с несколькими расписаниями, одно совпадает"""
+        now = datetime.now()
+        current_day = now.weekday()
+        current_time = now.strftime("%H:%M")
+        wrong_day = (current_day + 1) % 7
+        
+        self.config.config["schedule_enabled"] = True
+        self.config.config["schedules"] = [
+            {
+                "days": [wrong_day],
+                "time": current_time
+            },
+            {
+                "days": [current_day],
+                "time": current_time
+            }
+        ]
+        
+        input_data = {
+            "schedule_enabled": True,
+            "current_day": current_day,
+            "current_time": current_time,
+            "schedules_count": len(self.config.config["schedules"]),
+            "check_interval_minutes": 60
+        }
+        
+        result = self.backup_manager._check_schedule(60)
+        
+        print_test_info("Проверка расписания (несколько расписаний, одно совпадает)", input_data, {"result": result}, {"result": True})
+        
+        self.assertTrue(result)  # Хотя бы одно расписание совпадает
+    
+    def test_check_schedule_multiple_schedules_none_match(self):
+        """Тест проверки расписания с несколькими расписаниями, ни одно не совпадает"""
+        now = datetime.now()
+        current_day = now.weekday()
+        wrong_day1 = (current_day + 1) % 7
+        wrong_day2 = (current_day + 2) % 7
+        future_time = (now + timedelta(hours=1)).strftime("%H:%M")
+        
+        self.config.config["schedule_enabled"] = True
+        self.config.config["schedules"] = [
+            {
+                "days": [wrong_day1],
+                "time": now.strftime("%H:%M")
+            },
+            {
+                "days": [wrong_day2],
+                "time": future_time
+            }
+        ]
+        
+        input_data = {
+            "schedule_enabled": True,
+            "current_day": current_day,
+            "current_time": now.strftime("%H:%M"),
+            "schedules_count": len(self.config.config["schedules"]),
+            "check_interval_minutes": 60
+        }
+        
+        result = self.backup_manager._check_schedule(60)
+        
+        print_test_info("Проверка расписания (несколько расписаний, ни одно не совпадает)", input_data, {"result": result}, {"result": False})
+        
+        self.assertFalse(result)
+    
+    def test_check_schedule_time_within_interval(self):
+        """Тест проверки расписания с учетом интервала проверки"""
+        now = datetime.now()
+        current_day = now.weekday()
+        # Время расписания на 25 минут назад (в пределах половины интервала 60 минут)
+        schedule_time = (now - timedelta(minutes=25)).strftime("%H:%M")
+        
+        self.config.config["schedule_enabled"] = True
+        self.config.config["schedules"] = [
+            {
+                "days": [current_day],
+                "time": schedule_time
+            }
+        ]
+        
+        input_data = {
+            "schedule_enabled": True,
+            "current_day": current_day,
+            "current_time": now.strftime("%H:%M"),
+            "schedule_time": schedule_time,
+            "time_diff_minutes": 25,
+            "check_interval_minutes": 60
+        }
+        
+        result = self.backup_manager._check_schedule(60)
+        
+        print_test_info("Проверка расписания (время в пределах интервала)", input_data, {"result": result}, {"result": True})
+        
+        self.assertTrue(result)  # Время в пределах половины интервала (30 минут)
 
 
 if __name__ == '__main__':

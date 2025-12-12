@@ -260,6 +260,52 @@ class BackupManager:
         except Exception:
             return False
     
+    def _check_schedule(self, check_interval_minutes: float = 60) -> bool:
+        """Проверить, соответствует ли текущее время расписанию
+        
+        Args:
+            check_interval_minutes: Интервал проверки в минутах (для учета погрешности)
+        """
+        # Если расписание отключено, всегда разрешаем сканирование
+        if not self.config.config.get("schedule_enabled", False):
+            return True
+        
+        # Получаем список расписаний
+        schedules = self.config.config.get("schedules", [])
+        if not schedules:
+            return True  # Если расписаний нет, разрешаем сканирование
+        
+        # Получаем текущее время
+        now = datetime.now()
+        current_day = now.weekday()  # 0=понедельник, 6=воскресенье
+        
+        # Проверяем каждое расписание
+        for schedule in schedules:
+            schedule_days = schedule.get("days", [])
+            if current_day not in schedule_days:
+                continue  # День не подходит, проверяем следующее расписание
+            
+            # Проверяем время
+            schedule_time_str = schedule.get("time", "00:00")
+            try:
+                schedule_hour, schedule_minute = map(int, schedule_time_str.split(":"))
+                schedule_datetime = datetime(now.year, now.month, now.day, schedule_hour, schedule_minute)
+                
+                # Вычисляем разницу во времени
+                time_diff = abs((now - schedule_datetime).total_seconds() / 60)  # в минутах
+                
+                # Если разница меньше или равна половине интервала проверки, считаем что время совпадает
+                if time_diff <= (check_interval_minutes / 2):
+                    return True  # Найдено подходящее расписание
+            except (ValueError, AttributeError):
+                # Если не удалось распарсить время, используем точное совпадение
+                current_time_str = now.strftime("%H:%M")
+                if current_time_str == schedule_time_str:
+                    return True
+        
+        # Ни одно расписание не подошло
+        return False
+    
     def start_monitoring(self):
         """Запустить мониторинг в фоновом режиме"""
         self.running = True
@@ -278,11 +324,29 @@ class BackupManager:
             while self.running:
                 iteration += 1
                 logger.info(f"Начало проверки #{iteration} (интервал: {check_interval_minutes} минут)")
-                try:
-                    results = self.scan_and_clean()
-                    logger.info(f"Проверка #{iteration} завершена. Удалено: {len(results['deleted'])}, ошибок: {len(results['errors'])}, проверено: {results['total_scanned']}")
-                except Exception as e:
-                    logger.error(f"Ошибка при выполнении проверки #{iteration}: {e}", exc_info=True)
+                
+                # Проверяем расписание перед выполнением сканирования
+                if self._check_schedule(check_interval_minutes):
+                    try:
+                        results = self.scan_and_clean()
+                        logger.info(f"Проверка #{iteration} завершена. Удалено: {len(results['deleted'])}, ошибок: {len(results['errors'])}, проверено: {results['total_scanned']}")
+                    except Exception as e:
+                        logger.error(f"Ошибка при выполнении проверки #{iteration}: {e}", exc_info=True)
+                else:
+                    # Логируем информацию о расписаниях
+                    if self.config.config.get("schedule_enabled", False):
+                        schedules = self.config.config.get("schedules", [])
+                        schedules_info = []
+                        day_names = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"]
+                        for sched in schedules:
+                            days = sched.get("days", [])
+                            time_str = sched.get("time", "00:00")
+                            days_str = ", ".join([day_names[d] for d in days]) if days else "Нет дней"
+                            schedules_info.append(f"{days_str} в {time_str}")
+                        schedules_str = "; ".join(schedules_info)
+                        logger.info(f"Проверка #{iteration} пропущена (не соответствует расписанию: {schedules_str})")
+                    else:
+                        logger.info(f"Проверка #{iteration} пропущена (расписание отключено)")
                 
                 if self.running:
                     logger.info(f"Ожидание {check_interval_minutes} минут до следующей проверки...")

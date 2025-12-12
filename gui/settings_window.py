@@ -5,8 +5,10 @@ from PyQt5.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QTabWidget,
                              QPushButton, QLabel, QSpinBox, QCheckBox,
                              QFileDialog, QMessageBox, QDialogButtonBox,
                              QFormLayout, QGroupBox, QWidget, QMenu,
-                             QTreeWidgetItem)
-from PyQt5.QtCore import Qt, QPoint
+                             QTreeWidgetItem, QTimeEdit, QRadioButton,
+                             QButtonGroup, QListWidget, QListWidgetItem,
+                             QSplitter)
+from PyQt5.QtCore import Qt, QPoint, QTime
 from pathlib import Path
 from core.config_manager import ConfigManager
 from core.backup_manager import BackupManager
@@ -143,6 +145,49 @@ class SettingsWindow(QDialog):
         group = QGroupBox("Настройки мониторинга")
         form_layout = QFormLayout()
         
+        # Режим работы: интервал или расписание
+        mode_layout = QHBoxLayout()
+        mode_label = QLabel("Режим работы:")
+        mode_layout.addWidget(mode_label)
+        
+        self.mode_button_group = QButtonGroup()
+        self.interval_radio = QRadioButton("По интервалу")
+        self.schedule_radio = QRadioButton("По расписанию")
+        self.mode_button_group.addButton(self.interval_radio, 0)
+        self.mode_button_group.addButton(self.schedule_radio, 1)
+        
+        # Поддержка старого формата для обратной совместимости
+        old_schedule = self.config.config.get("schedule", {})
+        if old_schedule and "enabled" in old_schedule:
+            # Миграция старого формата
+            if "schedules" not in self.config.config or not self.config.config.get("schedules"):
+                self.config.config["schedule_enabled"] = old_schedule.get("enabled", False)
+                if old_schedule.get("enabled", False):
+                    self.config.config["schedules"] = [{
+                        "days": old_schedule.get("days", [0, 1, 2, 3, 4, 5, 6]),
+                        "time": old_schedule.get("time", "00:00")
+                    }]
+                else:
+                    self.config.config["schedules"] = [{
+                        "days": [0, 1, 2, 3, 4, 5, 6],
+                        "time": "00:00"
+                    }]
+        
+        schedule_enabled = self.config.config.get("schedule_enabled", False)
+        
+        if schedule_enabled:
+            self.schedule_radio.setChecked(True)
+        else:
+            self.interval_radio.setChecked(True)
+        
+        self.interval_radio.toggled.connect(self._on_mode_changed)
+        self.schedule_radio.toggled.connect(self._on_mode_changed)
+        
+        mode_layout.addWidget(self.interval_radio)
+        mode_layout.addWidget(self.schedule_radio)
+        mode_layout.addStretch()
+        form_layout.addRow("", mode_layout)
+        
         # Интервал проверки
         self.interval_spin = QSpinBox()
         self.interval_spin.setRange(1, 10080)  # От 1 минуты до 7 дней (10080 минут)
@@ -152,7 +197,18 @@ class SettingsWindow(QDialog):
             self.interval_spin.setValue(self.config.config.get("check_interval_seconds", 3600) // 60)
         else:
             self.interval_spin.setValue(self.config.config.get("check_interval_minutes", 60))
-        form_layout.addRow("Интервал проверки:", self.interval_spin)
+        
+        # Создаем виджет-обертку для метки и подсказки
+        interval_label_widget = QWidget()
+        interval_label_layout = QVBoxLayout(interval_label_widget)
+        interval_label_layout.setContentsMargins(0, 0, 0, 0)
+        interval_label = QLabel("Интервал проверки:")
+        interval_hint = QLabel("(в режиме расписания - частота проверки расписания)")
+        interval_hint.setStyleSheet("color: gray; font-size: 8pt;")
+        interval_label_layout.addWidget(interval_label)
+        interval_label_layout.addWidget(interval_hint)
+        
+        form_layout.addRow(interval_label_widget, self.interval_spin)
         
         # Автозапуск
         self.auto_start_check = QCheckBox()
@@ -161,6 +217,90 @@ class SettingsWindow(QDialog):
         
         group.setLayout(form_layout)
         layout.addWidget(group)
+        
+        # Группа настроек расписания
+        schedule_group = QGroupBox("Расписание сканирования")
+        schedule_layout = QVBoxLayout()
+        
+        # Список расписаний
+        schedules_list_layout = QHBoxLayout()
+        
+        # Левая часть: список расписаний
+        left_widget = QWidget()
+        left_layout = QVBoxLayout(left_widget)
+        left_layout.setContentsMargins(0, 0, 0, 0)
+        
+        self.schedules_list = QListWidget()
+        self.schedules_list.currentRowChanged.connect(self._on_schedule_selected)
+        left_layout.addWidget(QLabel("Расписания:"))
+        left_layout.addWidget(self.schedules_list)
+        
+        # Кнопки управления списком
+        list_buttons_layout = QHBoxLayout()
+        self.btn_add_schedule = QPushButton("Добавить расписание")
+        self.btn_add_schedule.clicked.connect(self._add_schedule)
+        self.btn_remove_schedule = QPushButton("Удалить расписание")
+        self.btn_remove_schedule.clicked.connect(self._remove_schedule)
+        list_buttons_layout.addWidget(self.btn_add_schedule)
+        list_buttons_layout.addWidget(self.btn_remove_schedule)
+        left_layout.addLayout(list_buttons_layout)
+        
+        schedules_list_layout.addWidget(left_widget)
+        
+        # Правая часть: форма редактирования расписания
+        right_widget = QWidget()
+        right_layout = QVBoxLayout(right_widget)
+        right_layout.setContentsMargins(0, 0, 0, 0)
+        
+        edit_label = QLabel("Настройки расписания:")
+        right_layout.addWidget(edit_label)
+        
+        # Дни недели
+        days_label = QLabel("Дни недели:")
+        right_layout.addWidget(days_label)
+        
+        days_layout = QHBoxLayout()
+        self.day_checks = []
+        day_names = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"]
+        
+        for i, day_name in enumerate(day_names):
+            check = QCheckBox(day_name)
+            check.stateChanged.connect(self._on_schedule_changed)
+            self.day_checks.append(check)
+            days_layout.addWidget(check)
+        
+        days_layout.addStretch()
+        right_layout.addLayout(days_layout)
+        
+        # Время
+        time_layout = QHBoxLayout()
+        time_label = QLabel("Время:")
+        time_layout.addWidget(time_label)
+        
+        self.time_edit = QTimeEdit()
+        self.time_edit.setDisplayFormat("HH:mm")
+        self.time_edit.timeChanged.connect(self._on_schedule_changed)
+        time_layout.addWidget(self.time_edit)
+        time_layout.addStretch()
+        right_layout.addLayout(time_layout)
+        
+        right_layout.addStretch()
+        schedules_list_layout.addWidget(right_widget, 2)  # Правая часть занимает больше места
+        
+        schedule_layout.addLayout(schedules_list_layout)
+        
+        schedule_group.setLayout(schedule_layout)
+        layout.addWidget(schedule_group)
+        
+        # Инициализируем список расписаний
+        self._refresh_schedules_list()
+        
+        # Обновляем состояние элементов в зависимости от выбранного режима
+        self._on_mode_changed()
+        
+        # Выбираем первое расписание, если есть
+        if self.schedules_list.count() > 0:
+            self.schedules_list.setCurrentRow(0)
         
         layout.addStretch()
         
@@ -342,6 +482,127 @@ class SettingsWindow(QDialog):
         
         menu.exec_(self.rules_tree.viewport().mapToGlobal(position))
     
+    def _on_mode_changed(self):
+        """Обработчик изменения режима работы (интервал/расписание)"""
+        schedule_mode = self.schedule_radio.isChecked()
+        
+        # Интервал всегда активен (используется и для проверки расписания)
+        # Но в режиме "По интервалу" он определяет частоту сканирования,
+        # а в режиме "По расписанию" - частоту проверки расписания
+        
+        # Активируем/деактивируем элементы расписания
+        self.schedules_list.setEnabled(schedule_mode)
+        self.btn_add_schedule.setEnabled(schedule_mode)
+        self.btn_remove_schedule.setEnabled(schedule_mode and self.schedules_list.count() > 1)
+        for check in self.day_checks:
+            check.setEnabled(schedule_mode)
+        self.time_edit.setEnabled(schedule_mode)
+    
+    def _refresh_schedules_list(self):
+        """Обновить список расписаний"""
+        self.schedules_list.clear()
+        schedules = self.config.config.get("schedules", [])
+        day_names = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"]
+        
+        for i, schedule in enumerate(schedules):
+            days = schedule.get("days", [])
+            time_str = schedule.get("time", "00:00")
+            days_str = ", ".join([day_names[d] for d in days]) if days else "Нет дней"
+            item_text = f"{days_str} в {time_str}"
+            self.schedules_list.addItem(item_text)
+        
+        # Обновляем состояние кнопки удаления
+        self.btn_remove_schedule.setEnabled(self.schedules_list.count() > 1)
+    
+    def _on_schedule_selected(self, row: int):
+        """Обработчик выбора расписания из списка"""
+        if row < 0:
+            return
+        
+        schedules = self.config.config.get("schedules", [])
+        if row >= len(schedules):
+            return
+        
+        schedule = schedules[row]
+        days = schedule.get("days", [])
+        time_str = schedule.get("time", "00:00")
+        
+        # Обновляем чекбоксы дней
+        for i, check in enumerate(self.day_checks):
+            check.blockSignals(True)
+            check.setChecked(i in days)
+            check.blockSignals(False)
+        
+        # Обновляем время
+        try:
+            hour, minute = map(int, time_str.split(":"))
+            self.time_edit.blockSignals(True)
+            self.time_edit.setTime(QTime(hour, minute))
+            self.time_edit.blockSignals(False)
+        except:
+            pass
+    
+    def _on_schedule_changed(self):
+        """Обработчик изменения настроек расписания"""
+        current_row = self.schedules_list.currentRow()
+        if current_row < 0:
+            return
+        
+        schedules = self.config.config.get("schedules", [])
+        if current_row >= len(schedules):
+            return
+        
+        # Обновляем расписание
+        schedule = schedules[current_row]
+        schedule["days"] = [i for i, check in enumerate(self.day_checks) if check.isChecked()]
+        time = self.time_edit.time()
+        schedule["time"] = time.toString("HH:mm")
+        
+        # Обновляем отображение в списке
+        day_names = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"]
+        days = schedule["days"]
+        days_str = ", ".join([day_names[d] for d in days]) if days else "Нет дней"
+        item_text = f"{days_str} в {schedule['time']}"
+        self.schedules_list.item(current_row).setText(item_text)
+    
+    def _add_schedule(self):
+        """Добавить новое расписание"""
+        schedules = self.config.config.get("schedules", [])
+        new_schedule = {
+            "days": [0, 1, 2, 3, 4, 5, 6],
+            "time": "00:00"
+        }
+        schedules.append(new_schedule)
+        self.config.config["schedules"] = schedules
+        self._refresh_schedules_list()
+        # Выбираем новое расписание
+        self.schedules_list.setCurrentRow(len(schedules) - 1)
+        # Обновляем состояние кнопки удаления
+        self._on_mode_changed()
+    
+    def _remove_schedule(self):
+        """Удалить выбранное расписание"""
+        current_row = self.schedules_list.currentRow()
+        if current_row < 0:
+            return
+        
+        schedules = self.config.config.get("schedules", [])
+        if len(schedules) <= 1:
+            QMessageBox.warning(self, "Предупреждение", "Нельзя удалить последнее расписание")
+            return
+        
+        schedules.pop(current_row)
+        self.config.config["schedules"] = schedules
+        self._refresh_schedules_list()
+        
+        # Выбираем предыдущее или следующее расписание
+        if self.schedules_list.count() > 0:
+            new_row = min(current_row, self.schedules_list.count() - 1)
+            self.schedules_list.setCurrentRow(new_row)
+        
+        # Обновляем состояние кнопки удаления
+        self._on_mode_changed()
+    
     def _save_general_settings(self):
         """Сохранить общие настройки"""
         minutes = self.interval_spin.value()
@@ -353,6 +614,21 @@ class SettingsWindow(QDialog):
             del self.config.config["check_interval_seconds"]
         self.config.config["auto_start"] = self.auto_start_check.isChecked()
         
+        # Сохраняем настройки расписания
+        schedule_enabled = self.schedule_radio.isChecked()
+        self.config.config["schedule_enabled"] = schedule_enabled
+        
+        # Сохраняем текущее редактируемое расписание
+        current_row = self.schedules_list.currentRow()
+        if current_row >= 0:
+            schedules = self.config.config.get("schedules", [])
+            if current_row < len(schedules):
+                schedule = schedules[current_row]
+                schedule["days"] = [i for i, check in enumerate(self.day_checks) if check.isChecked()]
+                time = self.time_edit.time()
+                schedule["time"] = time.toString("HH:mm")
+                self.config.config["schedules"] = schedules
+        
         try:
             self.config.save_config()
             
@@ -362,11 +638,18 @@ class SettingsWindow(QDialog):
                 # Перезапускаем мониторинг с новым интервалом
                 self.backup_manager.start_monitoring()
             
-            message = f"Настройки сохранены\nИнтервал проверки: {minutes} минут"
-            if self.config.config["auto_start"]:
-                message += "\nАвтозапуск включен. Приложение будет запускаться при старте Windows."
+            if schedule_enabled:
+                schedules = self.config.config.get("schedules", [])
+                schedules_count = len(schedules)
+                message = f"Настройки сохранены\nРежим: По расписанию\nРасписаний: {schedules_count}\nИнтервал проверки: {minutes} минут (для проверки расписания)"
             else:
-                message += "\nАвтозапуск отключен."
+                message = f"Настройки сохранены\nРежим: По интервалу\nИнтервал проверки: {minutes} минут"
+            
+            if self.config.config["auto_start"]:
+                message += "\n\nАвтозапуск включен. Приложение будет запускаться при старте Windows."
+            else:
+                message += "\n\nАвтозапуск отключен."
+            
             QMessageBox.information(self, "Успех", message)
         except Exception as e:
             QMessageBox.warning(self, "Предупреждение", 

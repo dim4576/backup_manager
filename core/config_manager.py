@@ -37,7 +37,14 @@ class ConfigManager:
             }
         ],
         "check_interval_minutes": 60,  # Проверка каждые 60 минут (1 час)
-        "auto_start": False
+        "auto_start": False,
+        "schedule_enabled": False,  # Включено ли использование расписаний
+        "schedules": [
+            {
+                "days": [0, 1, 2, 3, 4, 5, 6],  # Дни недели: 0=понедельник, 6=воскресенье
+                "time": "00:00"  # Время в формате HH:MM
+            }
+        ]
     }
     
     def __init__(self):
@@ -50,6 +57,27 @@ class ConfigManager:
             try:
                 with open(self.CONFIG_FILE, 'r', encoding='utf-8') as f:
                     config = yaml.safe_load(f) or {}
+                    
+                    # Миграция старого формата расписания
+                    old_schedule = config.get("schedule", {})
+                    if old_schedule and "enabled" in old_schedule:
+                        # Мигрируем старый формат в новый
+                        if "schedules" not in config or not config.get("schedules"):
+                            config["schedule_enabled"] = old_schedule.get("enabled", False)
+                            if old_schedule.get("enabled", False):
+                                config["schedules"] = [{
+                                    "days": old_schedule.get("days", [0, 1, 2, 3, 4, 5, 6]),
+                                    "time": old_schedule.get("time", "00:00")
+                                }]
+                            else:
+                                config["schedules"] = [{
+                                    "days": [0, 1, 2, 3, 4, 5, 6],
+                                    "time": "00:00"
+                                }]
+                        # Удаляем старое поле
+                        if "schedule" in config:
+                            del config["schedule"]
+                    
                     # Объединяем с дефолтной конфигурацией
                     return {**self.DEFAULT_CONFIG, **config}
             except Exception as e:
