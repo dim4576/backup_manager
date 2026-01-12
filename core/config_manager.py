@@ -44,7 +44,8 @@ class ConfigManager:
                 "days": [0, 1, 2, 3, 4, 5, 6],  # Дни недели: 0=понедельник, 6=воскресенье
                 "time": "00:00"  # Время в формате HH:MM
             }
-        ]
+        ],
+        "s3_buckets": []  # Список S3 бакетов с учётными данными
     }
     
     def __init__(self):
@@ -221,5 +222,32 @@ class ConfigManager:
         if 0 <= index < len(rules):
             rules.pop(index)
             self.config["rules"] = rules
+            self.save_config()
+    
+    def get_s3_buckets(self) -> List[Dict[str, Any]]:
+        """Получить список S3 бакетов"""
+        return self.config.get("s3_buckets", [])
+    
+    def add_s3_bucket(self, bucket: Dict[str, Any]):
+        """Добавить S3 бакет"""
+        buckets = self.get_s3_buckets()
+        buckets.append(bucket)
+        self.config["s3_buckets"] = buckets
+        self.save_config()
+    
+    def update_s3_bucket(self, index: int, bucket: Dict[str, Any]):
+        """Обновить S3 бакет по индексу"""
+        buckets = self.get_s3_buckets()
+        if 0 <= index < len(buckets):
+            buckets[index] = bucket
+            self.config["s3_buckets"] = buckets
+            self.save_config()
+    
+    def remove_s3_bucket(self, index: int):
+        """Удалить S3 бакет по индексу"""
+        buckets = self.get_s3_buckets()
+        if 0 <= index < len(buckets):
+            buckets.pop(index)
+            self.config["s3_buckets"] = buckets
             self.save_config()
 

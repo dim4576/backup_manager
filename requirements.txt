@@ -9,4 +9,9 @@ PyYAML>=6.0
 # Для удаления файлов в корзину
 send2trash>=1.8.2
 
+# Для работы с S3
+boto3>=1.26.0
+requests>=2.28.0
+requests-aws4auth>=1.1.2
+
 

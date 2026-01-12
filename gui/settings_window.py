@@ -7,14 +7,89 @@ from PyQt5.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QTabWidget,
                              QFormLayout, QGroupBox, QWidget, QMenu,
                              QTreeWidgetItem, QTimeEdit, QRadioButton,
                              QButtonGroup, QListWidget, QListWidgetItem,
-                             QSplitter)
-from PyQt5.QtCore import Qt, QPoint, QTime
+                             QSplitter, QTableWidget, QTableWidgetItem,
+                             QHeaderView)
+from PyQt5.QtCore import Qt, QPoint, QTime, QThread, pyqtSignal
 from pathlib import Path
 from core.config_manager import ConfigManager
 from core.backup_manager import BackupManager
 from core.logger import get_log_file_path
+from core.s3_manager import check_bucket_availability, normalize_endpoint
 from gui.widgets import FoldersTreeWidget, RulesTreeWidget
 from gui.rule_dialog import RuleDialog
+from gui.s3_bucket_dialog import S3BucketDialog
+
+
+class S3TestWorker(QThread):
+    """Рабочий поток для проверки доступности S3 бакета"""
+    finished = pyqtSignal(str, str)  # result, details
+    
+    def __init__(self, bucket, normalize_endpoint_func):
+        super().__init__()
+        self.bucket = bucket
+        self.normalize_endpoint = normalize_endpoint_func
+    
+    def run(self):
+        """Выполнить проверку доступности в отдельном потоке"""
+        bucket_name = self.bucket.get("name")
+        # Проверяем, что bucket_name не None и является строкой
+        if not bucket_name or not isinstance(bucket_name, str) or not bucket_name.strip():
+            result = "Ошибка конфигурации"
+            details = "Имя бакета не указано или имеет неверный формат."
+            self.finished.emit(result, details)
+            return
+        
+        bucket_name = bucket_name.strip()
+        
+        try:
+            # Получаем параметры подключения
+            access_key = self.bucket.get("access_key")
+            secret_key = self.bucket.get("secret_key")
+            region = self.bucket.get("region")
+            endpoint = self.bucket.get("endpoint")
+            
+            # Нормализуем endpoint
+            if endpoint:
+                if isinstance(endpoint, str) and endpoint.strip():
+                    normalized = self.normalize_endpoint(endpoint)
+                    if normalized and isinstance(normalized, str) and normalized.strip():
+                        endpoint = normalized
+                    else:
+                        endpoint = None
+                else:
+                    endpoint = None
+            
+            # Устанавливаем регион по умолчанию если не указан
+            if region and isinstance(region, str) and region.strip():
+                region_name = region.strip()
+            else:
+                region_name = 'us-east-1'
+            
+            # Используем функцию из модуля s3_manager
+            success, result, details = check_bucket_availability(
+                bucket_name,
+                access_key,
+                secret_key,
+                region_name,
+                endpoint,
+                timeout=15
+            )
+            
+            # Отправляем результат через сигнал
+            self.finished.emit(result, details)
+            
+        except ImportError:
+            result = "Ошибка"
+            details = "Библиотека boto3 не установлена. Установите её командой:\npip install boto3"
+            self.finished.emit(result, details)
+        except Exception as e:
+            result = "Ошибка"
+            error_msg = str(e)
+            error_type = type(e).__name__
+            import traceback
+            tb_str = traceback.format_exc()
+            details = f"Произошла непредвиденная ошибка:\n\nТип ошибки: {error_type}\nСообщение: {error_msg}\n\nДетали:\n{tb_str}"
+            self.finished.emit(result, details)
 
 
 class SettingsWindow(QDialog):
@@ -48,6 +123,10 @@ class SettingsWindow(QDialog):
         # Вкладка общих настроек
         general_tab = self._create_general_tab()
         tabs.addTab(general_tab, "Общие настройки")
+        
+        # Вкладка настройки S3
+        s3_tab = self._create_s3_tab()
+        tabs.addTab(s3_tab, "Настройка S3")
         
         layout.addWidget(tabs)
         
@@ -654,4 +733,174 @@ class SettingsWindow(QDialog):
         except Exception as e:
             QMessageBox.warning(self, "Предупреждение", 
                               f"Настройки сохранены, но произошла ошибка при установке автозапуска:\n{e}")
+    
+    def _create_s3_tab(self):
+        """Создать вкладку с настройками S3"""
+        widget = QWidget()
+        layout = QVBoxLayout(widget)
+        
+        label = QLabel("S3 бакеты:")
+        layout.addWidget(label)
+        
+        # Таблица бакетов
+        self.s3_table = QTableWidget()
+        self.s3_table.setColumnCount(5)
+        self.s3_table.setHorizontalHeaderLabels(["Имя бакета", "Endpoint", "Access Key", "Регион", "Действия"])
+        self.s3_table.horizontalHeader().setStretchLastSection(True)
+        self.s3_table.setSelectionBehavior(QTableWidget.SelectRows)
+        self.s3_table.setEditTriggers(QTableWidget.NoEditTriggers)
+        layout.addWidget(self.s3_table)
+        
+        # Кнопки управления
+        btn_layout = QHBoxLayout()
+        
+        btn_add = QPushButton("Добавить бакет")
+        btn_add.clicked.connect(self._add_s3_bucket)
+        btn_layout.addWidget(btn_add)
+        
+        btn_edit = QPushButton("Редактировать")
+        btn_edit.clicked.connect(self._edit_s3_bucket)
+        btn_layout.addWidget(btn_edit)
+        
+        btn_remove = QPushButton("Удалить бакет")
+        btn_remove.clicked.connect(self._remove_s3_bucket)
+        btn_layout.addWidget(btn_remove)
+        
+        btn_refresh = QPushButton("Обновить список")
+        btn_refresh.clicked.connect(self._refresh_s3_buckets)
+        btn_layout.addWidget(btn_refresh)
+        
+        btn_layout.addStretch()
+        layout.addLayout(btn_layout)
+        
+        self._refresh_s3_buckets()
+        return widget
+    
+    def _refresh_s3_buckets(self):
+        """Обновить список S3 бакетов"""
+        self.s3_table.setRowCount(0)
+        buckets = self.config.get_s3_buckets()
+        
+        for i, bucket in enumerate(buckets):
+            row = self.s3_table.rowCount()
+            self.s3_table.insertRow(row)
+            
+            # Имя бакета
+            name_item = QTableWidgetItem(bucket.get("name", ""))
+            self.s3_table.setItem(row, 0, name_item)
+            
+            # Endpoint
+            endpoint = bucket.get("endpoint", "") or "По умолчанию (AWS)"
+            endpoint_item = QTableWidgetItem(endpoint)
+            self.s3_table.setItem(row, 1, endpoint_item)
+            
+            # Access Key (показываем только первые 8 символов)
+            access_key = bucket.get("access_key", "")
+            access_key_display = access_key[:8] + "..." if len(access_key) > 8 else access_key
+            access_key_item = QTableWidgetItem(access_key_display)
+            self.s3_table.setItem(row, 2, access_key_item)
+            
+            # Регион
+            region = bucket.get("region", "") or "Не указан"
+            region_item = QTableWidgetItem(region)
+            self.s3_table.setItem(row, 3, region_item)
+            
+            # Кнопка проверки доступности
+            btn_test = QPushButton("Проверить доступность")
+            btn_test.clicked.connect(lambda checked, idx=i: self._test_s3_bucket(idx))
+            self.s3_table.setCellWidget(row, 4, btn_test)
+        
+        # Настраиваем ширину колонок
+        self.s3_table.resizeColumnsToContents()
+        self.s3_table.setColumnWidth(4, 180)  # Фиксированная ширина для кнопки
+    
+    def _add_s3_bucket(self):
+        """Добавить новый S3 бакет"""
+        dialog = S3BucketDialog(self, self.config, None)
+        if dialog.exec_() == QDialog.Accepted:
+            self._refresh_s3_buckets()
+    
+    def _edit_s3_bucket(self):
+        """Редактировать выбранный S3 бакет"""
+        current_row = self.s3_table.currentRow()
+        if current_row < 0:
+            QMessageBox.warning(self, "Предупреждение", "Выберите бакет для редактирования")
+            return
+        
+        dialog = S3BucketDialog(self, self.config, current_row)
+        if dialog.exec_() == QDialog.Accepted:
+            self._refresh_s3_buckets()
+    
+    def _remove_s3_bucket(self):
+        """Удалить выбранный S3 бакет"""
+        current_row = self.s3_table.currentRow()
+        if current_row < 0:
+            QMessageBox.warning(self, "Предупреждение", "Выберите бакет для удаления")
+            return
+        
+        bucket_name = self.s3_table.item(current_row, 0).text()
+        reply = QMessageBox.question(
+            self, "Подтверждение",
+            f"Удалить бакет '{bucket_name}'?",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No
+        )
+        
+        if reply == QMessageBox.Yes:
+            try:
+                self.config.remove_s3_bucket(current_row)
+                self._refresh_s3_buckets()
+            except Exception as e:
+                QMessageBox.critical(self, "Ошибка", f"Не удалось удалить бакет: {e}")
+    
+    def _normalize_endpoint(self, endpoint: str) -> str:
+        """Нормализовать endpoint URL - добавить протокол если его нет"""
+        return normalize_endpoint(endpoint)
+    
+    def _test_s3_bucket(self, bucket_index: int):
+        """Проверить доступность S3 бакета"""
+        buckets = self.config.get_s3_buckets()
+        if bucket_index < 0 or bucket_index >= len(buckets):
+            QMessageBox.warning(self, "Ошибка", "Неверный индекс бакета")
+            return
+        
+        bucket = buckets[bucket_index]
+        bucket_name = bucket.get("name", "")
+        
+        # Показываем диалог с прогрессом
+        progress_dialog = QMessageBox(self)
+        progress_dialog.setWindowTitle("Проверка доступности")
+        progress_dialog.setText(f"Проверка доступности бакета '{bucket_name}'...")
+        progress_dialog.setStandardButtons(QMessageBox.NoButton)
+        progress_dialog.setModal(True)
+        progress_dialog.show()
+        
+        # Создаём и запускаем рабочий поток
+        self.test_worker = S3TestWorker(bucket, self._normalize_endpoint)
+        
+        def on_test_finished(result, details):
+            """Обработчик завершения проверки"""
+            progress_dialog.close()
+            progress_dialog.deleteLater()
+            
+            # Показываем результат
+            result_dialog = QMessageBox(self)
+            result_dialog.setWindowTitle("Результат проверки доступности")
+            
+            if result == "Успешно":
+                result_dialog.setIcon(QMessageBox.Information)
+                result_dialog.setText(f"✓ {result}")
+            else:
+                result_dialog.setIcon(QMessageBox.Warning)
+                result_dialog.setText(f"✗ {result}")
+            
+            result_dialog.setDetailedText(details)
+            result_dialog.setStandardButtons(QMessageBox.Ok)
+            result_dialog.exec_()
+            
+            # Очищаем ссылку на поток
+            self.test_worker = None
+        
+        self.test_worker.finished.connect(on_test_finished)
+        self.test_worker.start()
 
