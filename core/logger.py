@@ -3,11 +3,29 @@
 """
 import logging
 import sys
+import threading
 from pathlib import Path
 from logging.handlers import RotatingFileHandler
 
 LOG_DIR = Path.home() / ".backup_manager" / "logs"
 LOG_FILE = LOG_DIR / "backup_manager.log"
+
+# Блокировка для потокобезопасной ротации логов
+_log_rotation_lock = threading.Lock()
+
+
+class ThreadSafeRotatingFileHandler(RotatingFileHandler):
+    """Потокобезопасный RotatingFileHandler для Windows"""
+    
+    def doRollover(self):
+        """Переопределяем doRollover с блокировкой"""
+        with _log_rotation_lock:
+            try:
+                super().doRollover()
+            except (PermissionError, OSError):
+                # Игнорируем ошибки ротации, если файл занят
+                # Это не критично - логирование продолжится в текущий файл
+                pass
 
 def setup_logger(name="BackupManager"):
     """Настроить логгер для приложения"""
@@ -29,7 +47,8 @@ def setup_logger(name="BackupManager"):
     )
     
     # Обработчик для записи в файл (с ротацией, макс. 5MB, 5 файлов)
-    file_handler = RotatingFileHandler(
+    # Используем потокобезопасный обработчик для Windows
+    file_handler = ThreadSafeRotatingFileHandler(
         LOG_FILE,
         maxBytes=5*1024*1024,  # 5MB
         backupCount=5,

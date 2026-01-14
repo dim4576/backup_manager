@@ -8,8 +8,8 @@ from PyQt5.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QTabWidget,
                              QTreeWidgetItem, QTimeEdit, QRadioButton,
                              QButtonGroup, QListWidget, QListWidgetItem,
                              QSplitter, QTableWidget, QTableWidgetItem,
-                             QHeaderView)
-from PyQt5.QtCore import Qt, QPoint, QTime, QThread, pyqtSignal
+                             QHeaderView, QProgressBar)
+from PyQt5.QtCore import Qt, QPoint, QTime, QThread, pyqtSignal, QTimer
 from pathlib import Path
 from core.config_manager import ConfigManager
 from core.backup_manager import BackupManager
@@ -103,6 +103,11 @@ class SettingsWindow(QDialog):
         self.setWindowTitle("Настройки Backup Manager")
         self.setMinimumSize(800, 600)
         
+        # Таймер для автоматического обновления списка задач
+        self.tasks_timer = QTimer(self)
+        self.tasks_timer.timeout.connect(self._refresh_tasks)
+        self.tasks_timer.setInterval(1000)  # Обновление каждую секунду
+        
         self._create_ui()
     
     def _create_ui(self):
@@ -127,6 +132,10 @@ class SettingsWindow(QDialog):
         # Вкладка настройки S3
         s3_tab = self._create_s3_tab()
         tabs.addTab(s3_tab, "Настройка S3")
+        
+        # Вкладка задач
+        tasks_tab = self._create_tasks_tab()
+        tabs.addTab(tasks_tab, "Задачи")
         
         layout.addWidget(tabs)
         
@@ -402,7 +411,7 @@ class SettingsWindow(QDialog):
         if folder:
             try:
                 self.config.add_watch_folder(Path(folder))
-                self._refresh_folders()
+                self._refresh_all_lists()
             except Exception as e:
                 QMessageBox.critical(self, "Ошибка", f"Не удалось добавить папку: {e}")
     
@@ -416,7 +425,7 @@ class SettingsWindow(QDialog):
         folder_path = Path(item.text(0))
         try:
             self.config.remove_watch_folder(folder_path)
-            self._refresh_folders()
+            self._refresh_all_lists()
         except Exception as e:
             QMessageBox.critical(self, "Ошибка", f"Не удалось удалить папку: {e}")
     
@@ -444,11 +453,20 @@ class SettingsWindow(QDialog):
         
         menu.exec_(self.folders_tree.viewport().mapToGlobal(position))
     
+    def _refresh_all_lists(self):
+        """Обновить все списки в окне настроек"""
+        if hasattr(self, 'folders_tree'):
+            self._refresh_folders()
+        if hasattr(self, 'rules_tree'):
+            self._refresh_rules()
+        if hasattr(self, 's3_table'):
+            self._refresh_s3_buckets()
+    
     def _add_rule(self):
         """Добавить новое правило"""
         dialog = RuleDialog(self, self.config, None)
         if dialog.exec_() == QDialog.Accepted:
-            self._refresh_rules()
+            self._refresh_all_lists()
     
     def _edit_rule(self):
         """Редактировать выбранное правило"""
@@ -463,7 +481,7 @@ class SettingsWindow(QDialog):
         if 0 <= rule_index < len(rules):
             dialog = RuleDialog(self, self.config, rule_index)
             if dialog.exec_() == QDialog.Accepted:
-                self._refresh_rules()
+                self._refresh_all_lists()
     
     def _remove_rule(self):
         """Удалить выбранное правило"""
@@ -475,7 +493,7 @@ class SettingsWindow(QDialog):
         rule_index = self.rules_tree.indexOfTopLevelItem(item)
         try:
             self.config.remove_rule(rule_index)
-            self._refresh_rules()
+            self._refresh_all_lists()
         except Exception as e:
             QMessageBox.critical(self, "Ошибка", f"Не удалось удалить правило: {e}")
     
@@ -744,8 +762,8 @@ class SettingsWindow(QDialog):
         
         # Таблица бакетов
         self.s3_table = QTableWidget()
-        self.s3_table.setColumnCount(5)
-        self.s3_table.setHorizontalHeaderLabels(["Имя бакета", "Endpoint", "Access Key", "Регион", "Действия"])
+        self.s3_table.setColumnCount(6)
+        self.s3_table.setHorizontalHeaderLabels(["Имя бакета", "Endpoint", "Access Key", "Регион", "Занят правилом", "Действия"])
         self.s3_table.horizontalHeader().setStretchLastSection(True)
         self.s3_table.setSelectionBehavior(QTableWidget.SelectRows)
         self.s3_table.setEditTriggers(QTableWidget.NoEditTriggers)
@@ -776,17 +794,33 @@ class SettingsWindow(QDialog):
         self._refresh_s3_buckets()
         return widget
     
+    def _get_bucket_usage_map(self):
+        """Получить словарь {имя_бакета: имя_правила} для занятых бакетов"""
+        bucket_to_rule = {}
+        rules = self.config.get_rules()
+        for rule in rules:
+            if rule.get("copy_enabled") and rule.get("copy_s3_bucket_name"):
+                bucket_name = rule.get("copy_s3_bucket_name")
+                rule_name = rule.get("name", "Без названия")
+                bucket_to_rule[bucket_name] = rule_name
+        return bucket_to_rule
+    
     def _refresh_s3_buckets(self):
         """Обновить список S3 бакетов"""
         self.s3_table.setRowCount(0)
         buckets = self.config.get_s3_buckets()
         
+        # Получаем информацию о занятости бакетов
+        bucket_to_rule = self._get_bucket_usage_map()
+        
         for i, bucket in enumerate(buckets):
             row = self.s3_table.rowCount()
             self.s3_table.insertRow(row)
             
+            bucket_name = bucket.get("name", "")
+            
             # Имя бакета
-            name_item = QTableWidgetItem(bucket.get("name", ""))
+            name_item = QTableWidgetItem(bucket_name)
             self.s3_table.setItem(row, 0, name_item)
             
             # Endpoint
@@ -805,20 +839,25 @@ class SettingsWindow(QDialog):
             region_item = QTableWidgetItem(region)
             self.s3_table.setItem(row, 3, region_item)
             
+            # Занят правилом
+            rule_name = bucket_to_rule.get(bucket_name)
+            rule_item = QTableWidgetItem(rule_name if rule_name else "(Не занят)")
+            self.s3_table.setItem(row, 4, rule_item)
+            
             # Кнопка проверки доступности
             btn_test = QPushButton("Проверить доступность")
             btn_test.clicked.connect(lambda checked, idx=i: self._test_s3_bucket(idx))
-            self.s3_table.setCellWidget(row, 4, btn_test)
+            self.s3_table.setCellWidget(row, 5, btn_test)
         
         # Настраиваем ширину колонок
         self.s3_table.resizeColumnsToContents()
-        self.s3_table.setColumnWidth(4, 180)  # Фиксированная ширина для кнопки
+        self.s3_table.setColumnWidth(5, 180)  # Фиксированная ширина для кнопки
     
     def _add_s3_bucket(self):
         """Добавить новый S3 бакет"""
         dialog = S3BucketDialog(self, self.config, None)
         if dialog.exec_() == QDialog.Accepted:
-            self._refresh_s3_buckets()
+            self._refresh_all_lists()
     
     def _edit_s3_bucket(self):
         """Редактировать выбранный S3 бакет"""
@@ -829,7 +868,7 @@ class SettingsWindow(QDialog):
         
         dialog = S3BucketDialog(self, self.config, current_row)
         if dialog.exec_() == QDialog.Accepted:
-            self._refresh_s3_buckets()
+            self._refresh_all_lists()
     
     def _remove_s3_bucket(self):
         """Удалить выбранный S3 бакет"""
@@ -849,9 +888,103 @@ class SettingsWindow(QDialog):
         if reply == QMessageBox.Yes:
             try:
                 self.config.remove_s3_bucket(current_row)
-                self._refresh_s3_buckets()
+                self._refresh_all_lists()
             except Exception as e:
                 QMessageBox.critical(self, "Ошибка", f"Не удалось удалить бакет: {e}")
+    
+    def _create_tasks_tab(self):
+        """Создать вкладку с задачами"""
+        widget = QWidget()
+        layout = QVBoxLayout(widget)
+        
+        label = QLabel("Текущие задачи:")
+        layout.addWidget(label)
+        
+        # Список задач
+        self.tasks_list = QListWidget()
+        layout.addWidget(self.tasks_list)
+        
+        # Кнопка обновления
+        btn_layout = QHBoxLayout()
+        btn_refresh = QPushButton("Обновить список")
+        btn_refresh.clicked.connect(self._refresh_tasks)
+        btn_layout.addWidget(btn_refresh)
+        btn_layout.addStretch()
+        layout.addLayout(btn_layout)
+        
+        self._refresh_tasks()
+        return widget
+    
+    def showEvent(self, event):
+        """Обработчик события показа окна"""
+        super().showEvent(event)
+        # Запускаем таймер обновления задач, если окно видимо
+        if hasattr(self, 'tasks_timer'):
+            self.tasks_timer.start()
+            self._refresh_tasks()  # Обновляем сразу при показе
+    
+    def hideEvent(self, event):
+        """Обработчик события скрытия окна"""
+        super().hideEvent(event)
+        # Останавливаем таймер обновления задач, если окно скрыто
+        if hasattr(self, 'tasks_timer'):
+            self.tasks_timer.stop()
+    
+    def _refresh_tasks(self):
+        """Обновить список задач"""
+        if not hasattr(self, 'tasks_list'):
+            return
+        
+        self.tasks_list.clear()
+        
+        # Получаем активные задачи из BackupManager
+        if hasattr(self.backup_manager, 'get_active_tasks'):
+            active_tasks = self.backup_manager.get_active_tasks()
+        else:
+            active_tasks = []
+        
+        if not active_tasks:
+            no_tasks_label = QLabel("(Нет активных задач)")
+            no_tasks_label.setStyleSheet("color: gray; font-style: italic; padding: 10px;")
+            no_tasks_item = QListWidgetItem()
+            no_tasks_item.setSizeHint(no_tasks_label.sizeHint())
+            self.tasks_list.addItem(no_tasks_item)
+            self.tasks_list.setItemWidget(no_tasks_item, no_tasks_label)
+        else:
+            # Отображаем список активных задач с прогресс-барами
+            for task in active_tasks:
+                task_widget = self._create_task_widget(task)
+                task_item = QListWidgetItem()
+                task_item.setSizeHint(task_widget.sizeHint())
+                self.tasks_list.addItem(task_item)
+                self.tasks_list.setItemWidget(task_item, task_widget)
+    
+    def _create_task_widget(self, task):
+        """Создать виджет для отображения задачи с прогресс-баром"""
+        widget = QWidget()
+        layout = QVBoxLayout(widget)
+        layout.setContentsMargins(5, 5, 5, 5)
+        
+        # Название задачи
+        task_label = QLabel(task.get("name", "Неизвестная задача"))
+        task_label.setStyleSheet("font-weight: bold;")
+        layout.addWidget(task_label)
+        
+        # Прогресс-бар
+        progress = QProgressBar()
+        progress.setMinimum(0)
+        progress.setMaximum(100)
+        progress_value = task.get("progress", 0)
+        progress.setValue(progress_value)
+        progress.setFormat("%p%")
+        layout.addWidget(progress)
+        
+        # Статус с информацией о количестве и размере
+        status_label = QLabel(task.get("status", "В процессе..."))
+        status_label.setStyleSheet("color: gray; font-size: 9pt;")
+        layout.addWidget(status_label)
+        
+        return widget
     
     def _normalize_endpoint(self, endpoint: str) -> str:
         """Нормализовать endpoint URL - добавить протокол если его нет"""

@@ -81,10 +81,8 @@ def test_s3_connection():
     
     if endpoint:
         s3_client_kwargs['endpoint_url'] = endpoint
-        if endpoint.startswith('http://'):
-            s3_client_kwargs['use_ssl'] = False
-        else:
-            s3_client_kwargs['use_ssl'] = True
+        # В новых версиях boto3 (>=1.26.0) параметр use_ssl устарел
+        # boto3 автоматически определяет SSL на основе протокола в endpoint_url
     
     print("Создание клиента S3...")
     try:

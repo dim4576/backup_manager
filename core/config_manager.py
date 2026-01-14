@@ -250,4 +250,11 @@ class ConfigManager:
             buckets.pop(index)
             self.config["s3_buckets"] = buckets
             self.save_config()
+    
+    def get_s3_bucket_by_name(self, name: str) -> Optional[Dict[str, Any]]:
+        """Получить S3 бакет по имени"""
+        for bucket in self.get_s3_buckets():
+            if bucket.get("name") == name:
+                return bucket
+        return None
 

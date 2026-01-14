@@ -5,7 +5,8 @@ import re
 from PyQt5.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QFormLayout,
                              QLineEdit, QComboBox, QSpinBox, QCheckBox,
                              QGroupBox, QLabel, QPushButton, QListWidget,
-                             QListWidgetItem, QDialogButtonBox, QMessageBox)
+                             QListWidgetItem, QDialogButtonBox, QMessageBox,
+                             QTabWidget, QWidget)
 from PyQt5.QtCore import Qt
 from pathlib import Path
 from typing import Optional
@@ -35,6 +36,13 @@ class RuleDialog(QDialog):
                 rule = rules[rule_index]
         
         main_layout = QVBoxLayout(self)
+        
+        # Создаём вкладки
+        tabs = QTabWidget()
+        
+        # Первая вкладка - Основные настройки
+        main_tab = QWidget()
+        main_tab_layout = QVBoxLayout(main_tab)
         
         # Форма с основными полями
         form_layout = QFormLayout()
@@ -159,7 +167,7 @@ class RuleDialog(QDialog):
         self.enabled_check.setChecked(rule.get("enabled", True))
         form_layout.addRow("Правило активно:", self.enabled_check)
         
-        main_layout.addLayout(form_layout)
+        main_tab_layout.addLayout(form_layout)
         
         # Группа выбора папок
         folders_group = QGroupBox("Применять к папкам:")
@@ -201,15 +209,99 @@ class RuleDialog(QDialog):
         
         folders_layout.addWidget(self.folders_list)
         folders_group.setLayout(folders_layout)
-        main_layout.addWidget(folders_group)
+        main_tab_layout.addWidget(folders_group)
         
-        main_layout.addStretch()
+        main_tab_layout.addStretch()
+        tabs.addTab(main_tab, "Основные настройки")
+        
+        # Вторая вкладка - Дополнительная синхронизация
+        copy_tab = self._create_copy_tab(rule)
+        tabs.addTab(copy_tab, "Дополнительная синхронизация")
+        
+        main_layout.addWidget(tabs)
         
         # Кнопки
         buttons = QDialogButtonBox(QDialogButtonBox.Save | QDialogButtonBox.Cancel)
         buttons.accepted.connect(self._save)
         buttons.rejected.connect(self.reject)
         main_layout.addWidget(buttons)
+    
+    def _create_copy_tab(self, rule):
+        """Создать вкладку 'Дополнительная синхронизация'"""
+        copy_tab = QWidget()
+        copy_tab_layout = QVBoxLayout(copy_tab)
+        
+        # Группа настроек дополнительной копии
+        copy_group = QGroupBox("Настройки дополнительной копии")
+        copy_form_layout = QFormLayout()
+        
+        # Чекбокс включения дополнительной копии
+        self.copy_enabled_check = QCheckBox("Создавать дополнительную копию после удаления")
+        copy_enabled = rule.get("copy_enabled", False)
+        self.copy_enabled_check.setChecked(copy_enabled)
+        self.copy_enabled_check.toggled.connect(self._on_copy_enabled_toggled)
+        copy_form_layout.addRow("Включить копирование:", self.copy_enabled_check)
+        
+        copy_hint = QLabel("(если отмечено, данные будут скопированы после удаления лишнего)")
+        copy_hint.setStyleSheet("color: gray; font-size: 9pt;")
+        copy_form_layout.addRow("", copy_hint)
+        
+        # Выбор S3 бакета
+        self.copy_s3_bucket_combo = QComboBox()
+        self.copy_s3_bucket_combo.addItem("(Не выбрано)", None)
+        
+        # Получаем все бакеты
+        all_buckets = self.config.get_s3_buckets()
+        # Получаем занятые бакеты (используются другими правилами)
+        occupied_bucket_names = self._get_occupied_bucket_names()
+        # Имя бакета текущего правила (если редактируем)
+        current_bucket_name = rule.get("copy_s3_bucket_name")
+        
+        # Заполняем список незанятыми бакетами
+        for bucket in all_buckets:
+            bucket_name = bucket.get("name", "")
+            if bucket_name:
+                # Показываем бакет, если он не занят другим правилом или это текущий бакет
+                if bucket_name not in occupied_bucket_names or bucket_name == current_bucket_name:
+                    self.copy_s3_bucket_combo.addItem(bucket_name, bucket_name)
+        
+        # Устанавливаем выбранный бакет
+        if current_bucket_name:
+            index = self.copy_s3_bucket_combo.findData(current_bucket_name)
+            if index >= 0:
+                self.copy_s3_bucket_combo.setCurrentIndex(index)
+        
+        copy_form_layout.addRow("S3 бакет для копирования:", self.copy_s3_bucket_combo)
+        
+        bucket_hint = QLabel("(выберите незанятый S3 бакет для хранения копий)")
+        bucket_hint.setStyleSheet("color: gray; font-size: 9pt;")
+        copy_form_layout.addRow("", bucket_hint)
+        
+        # Отключаем выбор бакета если копирование отключено
+        self.copy_s3_bucket_combo.setEnabled(copy_enabled)
+        
+        copy_group.setLayout(copy_form_layout)
+        copy_tab_layout.addWidget(copy_group)
+        
+        copy_tab_layout.addStretch()
+        return copy_tab
+    
+    def _get_occupied_bucket_names(self):
+        """Получить список имен S3 бакетов, занятых другими правилами"""
+        occupied = set()
+        rules = self.config.get_rules()
+        # Исключаем текущее правило при редактировании
+        for i, r in enumerate(rules):
+            if self.rule_index is not None and i == self.rule_index:
+                continue
+            bucket_name = r.get("copy_s3_bucket_name")
+            if bucket_name:
+                occupied.add(bucket_name)
+        return occupied
+    
+    def _on_copy_enabled_toggled(self, checked):
+        """Обработчик переключения чекбокса включения копирования"""
+        self.copy_s3_bucket_combo.setEnabled(checked)
     
     def _on_pattern_type_changed(self):
         """Обработчик изменения типа паттерна"""
@@ -298,6 +390,14 @@ class RuleDialog(QDialog):
             QMessageBox.warning(self, "Предупреждение", "Укажите возраст файлов для удаления (годы, месяцы, дни, часы или минуты)")
             return
         
+        # Получаем выбранный S3 бакет
+        copy_s3_bucket_name = None
+        if hasattr(self, 'copy_enabled_check') and self.copy_enabled_check.isChecked():
+            if hasattr(self, 'copy_s3_bucket_combo'):
+                bucket_data = self.copy_s3_bucket_combo.currentData()
+                if bucket_data:
+                    copy_s3_bucket_name = bucket_data
+        
         rule = {
             "name": self.name_edit.text().strip(),
             "pattern": self.pattern_edit.text().strip(),
@@ -306,7 +406,9 @@ class RuleDialog(QDialog):
             "enabled": self.enabled_check.isChecked(),
             "folders": folders,
             "keep_latest": self.keep_latest_spin.value(),
-            "permanent_delete": self.permanent_delete_check.isChecked()
+            "permanent_delete": self.permanent_delete_check.isChecked(),
+            "copy_enabled": hasattr(self, 'copy_enabled_check') and self.copy_enabled_check.isChecked(),
+            "copy_s3_bucket_name": copy_s3_bucket_name
         }
         
         if self.rule_index is None:

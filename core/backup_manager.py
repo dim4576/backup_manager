@@ -5,14 +5,16 @@ import time
 import threading
 import shutil
 import re
+import os
 from pathlib import Path
 from datetime import datetime
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 import fnmatch
 
 
 from core.config_manager import ConfigManager
 from core.logger import setup_logger
+from core.s3_manager import list_s3_objects, get_s3_object_metadata, upload_file_to_s3
 
 logger = setup_logger()
 
@@ -32,6 +34,9 @@ class BackupManager:
         self.config = config
         self.running = False
         self._lock = threading.Lock()
+        # Отслеживание активных задач удаления
+        self.active_tasks: Dict[str, Dict[str, Any]] = {}
+        self._task_lock = threading.Lock()
     
     def scan_and_clean(self) -> Dict[str, Any]:
         """
@@ -74,7 +79,99 @@ class BackupManager:
                 logger.error(error_msg, exc_info=True)
         
         logger.info(f"Сканирование завершено. Удалено: {len(results['deleted'])}, ошибок: {len(results['errors'])}, проверено: {results['total_scanned']}")
+        
+        # Удаляем все задачи после завершения сканирования
+        with self._task_lock:
+            self.active_tasks.clear()
+        
         return results
+    
+    def _get_path_size(self, path: Path) -> int:
+        """Получить размер файла или папки в байтах"""
+        try:
+            if path.is_file():
+                return path.stat().st_size
+            elif path.is_dir():
+                total_size = 0
+                for dirpath, dirnames, filenames in os.walk(path):
+                    for filename in filenames:
+                        filepath = os.path.join(dirpath, filename)
+                        try:
+                            total_size += os.path.getsize(filepath)
+                        except (OSError, PermissionError):
+                            pass
+                return total_size
+            return 0
+        except (OSError, PermissionError):
+            return 0
+    
+    def _create_task(self, task_id: str, rule_name: str, total_files: int, total_size: int) -> None:
+        """Создать задачу для отслеживания"""
+        with self._task_lock:
+            self.active_tasks[task_id] = {
+                "name": f"Удаление по правилу: {rule_name}",
+                "rule_name": rule_name,
+                "progress": 0,
+                "status": "В процессе...",
+                "total_files": total_files,
+                "processed_files": 0,
+                "total_size": total_size,
+                "processed_size": 0,
+                "start_time": time.time()
+            }
+    
+    def _update_task_progress(self, task_id: str, files_delta: int = 1, size_delta: int = 0) -> None:
+        """Обновить прогресс задачи"""
+        with self._task_lock:
+            if task_id in self.active_tasks:
+                task = self.active_tasks[task_id]
+                task["processed_files"] += files_delta
+                task["processed_size"] += size_delta
+                
+                # Рассчитываем прогресс в процентах (используем среднее между количеством и размером)
+                if task["total_files"] > 0:
+                    files_progress = (task["processed_files"] / task["total_files"]) * 100
+                else:
+                    files_progress = 100
+                
+                if task["total_size"] > 0:
+                    size_progress = (task["processed_size"] / task["total_size"]) * 100
+                else:
+                    size_progress = 100
+                
+                # Используем среднее значение
+                task["progress"] = int((files_progress + size_progress) / 2)
+                
+                # Обновляем статус
+                task["status"] = f"Обработано: {task['processed_files']}/{task['total_files']} файлов ({self._format_size(task['processed_size'])}/{self._format_size(task['total_size'])})"
+    
+    def _format_size(self, size_bytes: int) -> str:
+        """Форматировать размер в читаемый вид"""
+        for unit in ['Б', 'КБ', 'МБ', 'ГБ', 'ТБ']:
+            if size_bytes < 1024.0:
+                return f"{size_bytes:.1f} {unit}"
+            size_bytes /= 1024.0
+        return f"{size_bytes:.1f} ПБ"
+    
+    def _complete_task(self, task_id: str) -> None:
+        """Завершить задачу"""
+        with self._task_lock:
+            if task_id in self.active_tasks:
+                task = self.active_tasks[task_id]
+                task["progress"] = 100
+                task["status"] = f"Завершено: удалено {task['processed_files']} файлов ({self._format_size(task['processed_size'])})"
+                # Удаляем задачу через 5 секунд после завершения
+                def remove_task():
+                    time.sleep(5)
+                    with self._task_lock:
+                        if task_id in self.active_tasks:
+                            del self.active_tasks[task_id]
+                threading.Thread(target=remove_task, daemon=True).start()
+    
+    def get_active_tasks(self) -> List[Dict[str, Any]]:
+        """Получить список активных задач"""
+        with self._task_lock:
+            return list(self.active_tasks.values())
     
     def _process_folder(self, folder: Path, rules: List[Dict[str, Any]]) -> Dict[str, Any]:
         """Обработать одну папку согласно правилам"""
@@ -102,6 +199,7 @@ class BackupManager:
         
         for rule in applicable_rules:
             keep_latest = rule.get("keep_latest", 0)
+            rule_name = rule.get("name", "Безымянное правило")
             
             # Собираем все объекты, которые соответствуют правилу и по возрасту должны быть удалены
             matching_objects = []
@@ -122,7 +220,8 @@ class BackupManager:
                     except Exception:
                         continue  # Пропускаем объекты, к которым нет доступа
             
-            # Если нужно оставлять N самых свежих
+            # Определяем объекты для удаления
+            to_delete = []
             if keep_latest > 0 and matching_objects:
                 # Сортируем по дате модификации (от самых свежих к самым старым)
                 matching_objects.sort(key=lambda x: x[1], reverse=True)
@@ -134,29 +233,92 @@ class BackupManager:
                 # Помечаем оставляемые объекты как обработанные
                 for path, _ in to_keep:
                     processed_paths.add(path)
-                
-                # Удаляем остальные
-                for path, _ in to_delete:
-                    processed_paths.add(path)
-                    self._delete_path(path, results, rule)
             
             elif not keep_latest:  # keep_latest == 0, удаляем все подходящие
                 # Сортируем по дате модификации для единообразия
                 matching_objects.sort(key=lambda x: x[1], reverse=False)
+                to_delete = matching_objects
+            
+            # Создаем задачу для отслеживания прогресса удаления
+            task_id = None
+            if to_delete:
+                # Подсчитываем общее количество файлов и размер
+                total_files = 0
+                total_size = 0
+                for path, _ in to_delete:
+                    if path.is_file():
+                        total_files += 1
+                        total_size += self._get_path_size(path)
+                    elif path.is_dir():
+                        # Для папок считаем количество файлов внутри
+                        try:
+                            for root, dirs, files in os.walk(path):
+                                total_files += len(files)
+                                for file in files:
+                                    filepath = os.path.join(root, file)
+                                    try:
+                                        total_size += os.path.getsize(filepath)
+                                    except (OSError, PermissionError):
+                                        pass
+                        except (OSError, PermissionError):
+                            # Если не можем посчитать, просто добавляем 1 файл
+                            total_files += 1
                 
-                for path, _ in matching_objects:
-                    processed_paths.add(path)
-                    self._delete_path(path, results, rule)
+                # Создаем уникальный ID задачи
+                task_id = f"{rule_name}_{folder}_{time.time()}"
+                self._create_task(task_id, rule_name, total_files, total_size)
+                results["task_id"] = task_id
+            
+            # Удаляем объекты
+            for path, _ in to_delete:
+                processed_paths.add(path)
+                self._delete_path(path, results, rule, task_id)
+            
+            # Завершаем задачу после обработки правила
+            if task_id:
+                self._complete_task(task_id)
+            
+            # Проверяем, нужно ли выполнить дополнительную синхронизацию
+            if rule.get("copy_enabled") and rule.get("copy_s3_bucket_name"):
+                # Запускаем синхронизацию в отдельном потоке
+                sync_thread = threading.Thread(
+                    target=self._sync_to_s3,
+                    args=(folder, rule),
+                    daemon=True
+                )
+                sync_thread.start()
         
         return results
     
-    def _delete_path(self, path: Path, results: Dict[str, Any], rule: Dict[str, Any]):
+    def _delete_path(self, path: Path, results: Dict[str, Any], rule: Dict[str, Any], task_id: Optional[str] = None):
         """Удалить путь (файл или папку)"""
         permanent_delete = rule.get("permanent_delete", False)
         
         # Проверяем, что путь существует перед удалением
         if not path.exists():
             return
+        
+        # Получаем размер перед удалением для обновления прогресса
+        path_size = 0
+        files_count = 0
+        if path.is_file():
+            path_size = self._get_path_size(path)
+            files_count = 1
+        elif path.is_dir():
+            # Для папок подсчитываем размер и количество файлов
+            try:
+                for root, dirs, files in os.walk(path):
+                    files_count += len(files)
+                    for file in files:
+                        filepath = os.path.join(root, file)
+                        try:
+                            path_size += os.path.getsize(filepath)
+                        except (OSError, PermissionError):
+                            pass
+            except (OSError, PermissionError):
+                # Если не можем посчитать, используем размер папки
+                path_size = self._get_path_size(path)
+                files_count = 1
         
         try:
             if permanent_delete:
@@ -191,6 +353,12 @@ class BackupManager:
                     results["errors"].append(error_msg)
                     logger.error(error_msg, exc_info=True)
                     # Файл остаётся нетронутым
+                    return
+            
+            # Обновляем прогресс задачи после успешного удаления
+            if task_id:
+                self._update_task_progress(task_id, files_delta=files_count, size_delta=path_size)
+                
         except Exception as e:
             if path.is_file():
                 error_msg = f"Ошибка удаления {path}: {e}"
@@ -355,6 +523,149 @@ class BackupManager:
         thread = threading.Thread(target=monitor_loop, daemon=True)
         thread.start()
         logger.info("Поток мониторинга запущен")
+    
+    def _sync_to_s3(self, folder: Path, rule: Dict[str, Any]) -> None:
+        """
+        Синхронизировать файлы из папки в S3 бакет
+        
+        Args:
+            folder: Папка для синхронизации
+            rule: Правило удаления с настройками синхронизации
+        """
+        bucket_name = rule.get("copy_s3_bucket_name")
+        if not bucket_name:
+            return
+        
+        # Получаем информацию о бакете
+        bucket_config = self.config.get_s3_bucket_by_name(bucket_name)
+        if not bucket_config:
+            logger.error(f"Бакет '{bucket_name}' не найден в настройках")
+            return
+        
+        access_key = bucket_config.get("access_key")
+        secret_key = bucket_config.get("secret_key")
+        region = bucket_config.get("region", "us-east-1")
+        endpoint = bucket_config.get("endpoint")
+        
+        if not access_key or not secret_key:
+            logger.error(f"Не указаны учетные данные для бакета '{bucket_name}'")
+            return
+        
+        # Создаем задачу синхронизации
+        rule_name = rule.get("name", "Безымянное правило")
+        task_id = f"sync_{rule_name}_{folder}_{time.time()}"
+        
+        # Собираем все файлы из папки, которые соответствуют правилу (остались после удаления)
+        files_to_sync = []
+        try:
+            for root, dirs, files in os.walk(folder):
+                for file in files:
+                    file_path = Path(root) / file
+                    # Проверяем, соответствует ли файл правилу
+                    if self._matches_rule(file_path, rule):
+                        try:
+                            files_to_sync.append(file_path)
+                        except Exception:
+                            continue
+        except Exception as e:
+            logger.error(f"Ошибка при сборе файлов для синхронизации: {e}", exc_info=True)
+            return
+        
+        if not files_to_sync:
+            logger.info(f"Нет файлов для синхронизации в папке {folder}")
+            return
+        
+        # Подсчитываем общий размер
+        total_size = 0
+        for file_path in files_to_sync:
+            try:
+                total_size += self._get_path_size(file_path)
+            except Exception:
+                pass
+        
+        # Создаем задачу
+        self._create_task(task_id, f"Синхронизация: {rule_name}", len(files_to_sync), total_size)
+        
+        # Получаем список объектов в S3 (с префиксом, соответствующим папке)
+        folder_prefix = str(folder.name) + "/"
+        s3_objects = {}
+        try:
+            s3_objects_list = list_s3_objects(bucket_name, access_key, secret_key, region, endpoint, folder_prefix)
+            for obj in s3_objects_list:
+                s3_objects[obj["key"]] = obj
+        except Exception as e:
+            logger.error(f"Ошибка при получении списка объектов из S3: {e}", exc_info=True)
+            self._complete_task(task_id)
+            return
+        
+        # Синхронизируем файлы
+        processed_files = 0
+        processed_size = 0
+        
+        for file_path in files_to_sync:
+            try:
+                # Проверяем, что файл все еще существует (не был удален)
+                if not file_path.exists():
+                    continue
+                
+                # Определяем ключ объекта в S3 (относительный путь от папки)
+                relative_path = file_path.relative_to(folder)
+                s3_key = f"{folder.name}/{relative_path.as_posix()}"
+                
+                # Получаем метаданные локального файла
+                local_mtime = datetime.fromtimestamp(file_path.stat().st_mtime)
+                local_size = file_path.stat().st_size
+                
+                # Проверяем, есть ли файл в S3
+                s3_object = s3_objects.get(s3_key)
+                need_upload = False
+                
+                if not s3_object:
+                    # Файла нет в S3 - нужно загрузить
+                    need_upload = True
+                    logger.info(f"Файл отсутствует в S3, загружаем: {s3_key}")
+                else:
+                    # Файл есть в S3 - проверяем дату модификации
+                    s3_mtime = s3_object["last_modified"]
+                    if isinstance(s3_mtime, datetime):
+                        # Если локальный файл новее - загружаем с заменой
+                        if local_mtime > s3_mtime.replace(tzinfo=None):
+                            need_upload = True
+                            logger.info(f"Локальный файл новее, обновляем в S3: {s3_key}")
+                    else:
+                        # Если не можем сравнить даты, загружаем
+                        need_upload = True
+                
+                if need_upload:
+                    success, error_msg = upload_file_to_s3(
+                        str(file_path),
+                        bucket_name,
+                        s3_key,
+                        access_key,
+                        secret_key,
+                        region,
+                        endpoint
+                    )
+                    if success:
+                        processed_files += 1
+                        processed_size += local_size
+                        self._update_task_progress(task_id, files_delta=1, size_delta=local_size)
+                        logger.info(f"Файл загружен в S3: {s3_key}")
+                    else:
+                        logger.error(f"Ошибка при загрузке файла в S3: {error_msg}")
+                else:
+                    # Файл актуален, просто обновляем прогресс
+                    processed_files += 1
+                    processed_size += local_size
+                    self._update_task_progress(task_id, files_delta=1, size_delta=local_size)
+                    
+            except Exception as e:
+                logger.error(f"Ошибка при синхронизации файла {file_path}: {e}", exc_info=True)
+                continue
+        
+        # Завершаем задачу
+        self._complete_task(task_id)
+        logger.info(f"Синхронизация завершена: обработано {processed_files} файлов")
     
     def stop_monitoring(self):
         """Остановить мониторинг"""
