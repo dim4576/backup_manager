@@ -477,20 +477,23 @@ class BackupManager:
     def start_monitoring(self):
         """Запустить мониторинг в фоновом режиме"""
         self.running = True
-        # Поддержка старого формата для обратной совместимости
-        if "check_interval_seconds" in self.config.config:
-            check_interval_seconds = self.config.config.get("check_interval_seconds", 3600)
-            check_interval_minutes = check_interval_seconds / 60
-        else:
-            check_interval_minutes = self.config.config.get("check_interval_minutes", 60)
-            check_interval_seconds = check_interval_minutes * 60
         
-        logger.info(f"Запуск мониторинга с интервалом проверки: {check_interval_minutes} минут ({check_interval_seconds} секунд)")
+        logger.info("Запуск мониторинга")
         
         def monitor_loop():
             iteration = 0
             while self.running:
                 iteration += 1
+                
+                # Читаем интервал проверки из конфигурации на каждой итерации
+                # Поддержка старого формата для обратной совместимости
+                if "check_interval_seconds" in self.config.config:
+                    check_interval_seconds = self.config.config.get("check_interval_seconds", 3600)
+                    check_interval_minutes = check_interval_seconds / 60
+                else:
+                    check_interval_minutes = self.config.config.get("check_interval_minutes", 60)
+                    check_interval_seconds = check_interval_minutes * 60
+                
                 logger.info(f"Начало проверки #{iteration} (интервал: {check_interval_minutes} минут)")
                 
                 # Проверяем расписание перед выполнением сканирования
