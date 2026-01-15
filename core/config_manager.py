@@ -5,7 +5,7 @@ import yaml
 import sys
 import os
 from pathlib import Path
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 from core.logger import setup_logger
 
 # Импорт для работы с реестром Windows
