@@ -36,6 +36,7 @@ class ConfigManager:
                 "permanent_delete": False  # False = удалять в корзину, True = удалять навсегда
             }
         ],
+        "sync_rules": [],  # Правила синхронизации с S3 (отдельно от удаления)
         "check_interval_minutes": 60,  # Проверка каждые 60 минут (1 час)
         "auto_start": False,
         "schedule_enabled": False,  # Включено ли использование расписаний
@@ -256,5 +257,41 @@ class ConfigManager:
         for bucket in self.get_s3_buckets():
             if bucket.get("name") == name:
                 return bucket
+        return None
+    
+    # === Методы для работы с правилами синхронизации ===
+    
+    def get_sync_rules(self) -> List[Dict[str, Any]]:
+        """Получить список правил синхронизации"""
+        return self.config.get("sync_rules", [])
+    
+    def add_sync_rule(self, rule: Dict[str, Any]):
+        """Добавить правило синхронизации"""
+        rules = self.get_sync_rules()
+        rules.append(rule)
+        self.config["sync_rules"] = rules
+        self.save_config()
+    
+    def update_sync_rule(self, index: int, rule: Dict[str, Any]):
+        """Обновить правило синхронизации по индексу"""
+        rules = self.get_sync_rules()
+        if 0 <= index < len(rules):
+            rules[index] = rule
+            self.config["sync_rules"] = rules
+            self.save_config()
+    
+    def remove_sync_rule(self, index: int):
+        """Удалить правило синхронизации по индексу"""
+        rules = self.get_sync_rules()
+        if 0 <= index < len(rules):
+            rules.pop(index)
+            self.config["sync_rules"] = rules
+            self.save_config()
+    
+    def get_sync_rule_by_name(self, name: str) -> Optional[Dict[str, Any]]:
+        """Получить правило синхронизации по имени"""
+        for rule in self.get_sync_rules():
+            if rule.get("name") == name:
+                return rule
         return None
 

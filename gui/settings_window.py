@@ -18,6 +18,7 @@ from core.s3_manager import check_bucket_availability, normalize_endpoint
 from gui.widgets import FoldersTreeWidget, RulesTreeWidget
 from gui.rule_dialog import RuleDialog
 from gui.s3_bucket_dialog import S3BucketDialog
+from gui.sync_rule_dialog import SyncRuleDialog
 
 
 class S3TestWorker(QThread):
@@ -95,11 +96,12 @@ class S3TestWorker(QThread):
 class SettingsWindow(QDialog):
     """Окно настроек приложения"""
     
-    def __init__(self, parent, config: ConfigManager, backup_manager: BackupManager):
+    def __init__(self, parent, config: ConfigManager, backup_manager: BackupManager, sync_manager=None):
         """Инициализация окна настроек"""
         super().__init__(parent)
         self.config = config
         self.backup_manager = backup_manager
+        self.sync_manager = sync_manager
         self.setWindowTitle("Настройки Backup Manager")
         self.setMinimumSize(800, 600)
         
@@ -121,9 +123,13 @@ class SettingsWindow(QDialog):
         folders_tab = self._create_folders_tab()
         tabs.addTab(folders_tab, "Папки для мониторинга")
         
-        # Вкладка правил
+        # Вкладка правил удаления
         rules_tab = self._create_rules_tab()
         tabs.addTab(rules_tab, "Правила удаления")
+        
+        # Вкладка синхронизации с S3
+        sync_tab = self._create_sync_tab()
+        tabs.addTab(sync_tab, "Синхронизация S3")
         
         # Вкладка общих настроек
         general_tab = self._create_general_tab()
@@ -224,6 +230,192 @@ class SettingsWindow(QDialog):
         
         self._refresh_rules()
         return widget
+    
+    def _create_sync_tab(self):
+        """Создать вкладку с правилами синхронизации"""
+        widget = QWidget()
+        layout = QVBoxLayout(widget)
+        
+        # Описание
+        desc_label = QLabel(
+            "Правила синхронизации позволяют автоматически загружать файлы из выбранных папок в S3.\n"
+            "Каждое правило работает независимо от правил удаления."
+        )
+        desc_label.setStyleSheet("color: gray; font-size: 9pt; margin-bottom: 10px;")
+        desc_label.setWordWrap(True)
+        layout.addWidget(desc_label)
+        
+        label = QLabel("Правила синхронизации:")
+        layout.addWidget(label)
+        
+        # Таблица правил синхронизации
+        self.sync_rules_table = QTableWidget()
+        self.sync_rules_table.setColumnCount(6)
+        self.sync_rules_table.setHorizontalHeaderLabels([
+            "Название", "Бакет", "Папки", "Интервал", "Версионирование", "Вкл"
+        ])
+        self.sync_rules_table.horizontalHeader().setStretchLastSection(True)
+        self.sync_rules_table.setSelectionBehavior(QTableWidget.SelectRows)
+        self.sync_rules_table.setEditTriggers(QTableWidget.NoEditTriggers)
+        self.sync_rules_table.doubleClicked.connect(self._edit_sync_rule)
+        layout.addWidget(self.sync_rules_table)
+        
+        # Кнопки управления
+        btn_layout = QHBoxLayout()
+        
+        btn_add = QPushButton("Добавить правило")
+        btn_add.clicked.connect(self._add_sync_rule)
+        btn_layout.addWidget(btn_add)
+        
+        btn_edit = QPushButton("Редактировать")
+        btn_edit.clicked.connect(self._edit_sync_rule)
+        btn_layout.addWidget(btn_edit)
+        
+        btn_remove = QPushButton("Удалить правило")
+        btn_remove.clicked.connect(self._remove_sync_rule)
+        btn_layout.addWidget(btn_remove)
+        
+        btn_run_now = QPushButton("Запустить сейчас")
+        btn_run_now.clicked.connect(self._run_sync_now)
+        btn_layout.addWidget(btn_run_now)
+        
+        btn_refresh = QPushButton("Обновить список")
+        btn_refresh.clicked.connect(self._refresh_sync_rules)
+        btn_layout.addWidget(btn_refresh)
+        
+        btn_layout.addStretch()
+        layout.addLayout(btn_layout)
+        
+        self._refresh_sync_rules()
+        return widget
+    
+    def _refresh_sync_rules(self):
+        """Обновить список правил синхронизации"""
+        self.sync_rules_table.setRowCount(0)
+        rules = self.config.get_sync_rules()
+        
+        for rule in rules:
+            row = self.sync_rules_table.rowCount()
+            self.sync_rules_table.insertRow(row)
+            
+            # Название
+            name_item = QTableWidgetItem(rule.get("name", "Без названия"))
+            self.sync_rules_table.setItem(row, 0, name_item)
+            
+            # Бакет
+            bucket_item = QTableWidgetItem(rule.get("bucket_name", ""))
+            self.sync_rules_table.setItem(row, 1, bucket_item)
+            
+            # Папки
+            folders = rule.get("folders", [])
+            if not folders:
+                folders_str = "Не выбрано"
+            elif len(folders) == 1:
+                folders_str = Path(folders[0]).name
+            else:
+                folders_str = f"{len(folders)} папок"
+            folders_item = QTableWidgetItem(folders_str)
+            self.sync_rules_table.setItem(row, 2, folders_item)
+            
+            # Интервал
+            interval_minutes = rule.get("interval_minutes", 60)
+            if interval_minutes >= 24 * 60:
+                interval_str = f"{interval_minutes // (24 * 60)} дн."
+            elif interval_minutes >= 60:
+                interval_str = f"{interval_minutes // 60} ч."
+            else:
+                interval_str = f"{interval_minutes} мин."
+            interval_item = QTableWidgetItem(interval_str)
+            self.sync_rules_table.setItem(row, 3, interval_item)
+            
+            # Версионирование
+            versioning = "Да" if rule.get("versioning_enabled") else "Нет"
+            versioning_item = QTableWidgetItem(versioning)
+            self.sync_rules_table.setItem(row, 4, versioning_item)
+            
+            # Включено
+            enabled = "Да" if rule.get("enabled", True) else "Нет"
+            enabled_item = QTableWidgetItem(enabled)
+            self.sync_rules_table.setItem(row, 5, enabled_item)
+        
+        self.sync_rules_table.resizeColumnsToContents()
+    
+    def _add_sync_rule(self):
+        """Добавить новое правило синхронизации"""
+        # Проверяем, есть ли бакеты
+        if not self.config.get_s3_buckets():
+            QMessageBox.warning(
+                self, "Предупреждение",
+                "Сначала добавьте хотя бы один S3 бакет в разделе 'Настройка S3'"
+            )
+            return
+        
+        # Проверяем, есть ли папки
+        if not self.config.get_watch_folders():
+            QMessageBox.warning(
+                self, "Предупреждение",
+                "Сначала добавьте хотя бы одну папку для мониторинга в разделе 'Папки для мониторинга'"
+            )
+            return
+        
+        dialog = SyncRuleDialog(self, self.config, None)
+        if dialog.exec_() == QDialog.Accepted:
+            self._refresh_sync_rules()
+    
+    def _edit_sync_rule(self):
+        """Редактировать выбранное правило синхронизации"""
+        current_row = self.sync_rules_table.currentRow()
+        if current_row < 0:
+            QMessageBox.warning(self, "Предупреждение", "Выберите правило для редактирования")
+            return
+        
+        dialog = SyncRuleDialog(self, self.config, current_row)
+        if dialog.exec_() == QDialog.Accepted:
+            self._refresh_sync_rules()
+    
+    def _remove_sync_rule(self):
+        """Удалить выбранное правило синхронизации"""
+        current_row = self.sync_rules_table.currentRow()
+        if current_row < 0:
+            QMessageBox.warning(self, "Предупреждение", "Выберите правило для удаления")
+            return
+        
+        rule_name = self.sync_rules_table.item(current_row, 0).text()
+        reply = QMessageBox.question(
+            self, "Подтверждение",
+            f"Удалить правило синхронизации '{rule_name}'?",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No
+        )
+        
+        if reply == QMessageBox.Yes:
+            try:
+                self.config.remove_sync_rule(current_row)
+                self._refresh_sync_rules()
+            except Exception as e:
+                QMessageBox.critical(self, "Ошибка", f"Не удалось удалить правило: {e}")
+    
+    def _run_sync_now(self):
+        """Запустить синхронизацию немедленно"""
+        current_row = self.sync_rules_table.currentRow()
+        if current_row < 0:
+            QMessageBox.warning(self, "Предупреждение", "Выберите правило для запуска")
+            return
+        
+        if self.sync_manager is None:
+            QMessageBox.warning(self, "Ошибка", "Менеджер синхронизации не инициализирован")
+            return
+        
+        rule_name = self.sync_rules_table.item(current_row, 0).text()
+        
+        if self.sync_manager.run_sync_now(current_row):
+            QMessageBox.information(
+                self, "Синхронизация запущена",
+                f"Синхронизация для правила '{rule_name}' запущена.\n"
+                "Прогресс можно отслеживать во вкладке 'Задачи'."
+            )
+        else:
+            QMessageBox.warning(self, "Ошибка", "Не удалось запустить синхронизацию")
     
     def _create_general_tab(self):
         """Создать вкладку с общими настройками"""
@@ -459,6 +651,8 @@ class SettingsWindow(QDialog):
             self._refresh_folders()
         if hasattr(self, 'rules_tree'):
             self._refresh_rules()
+        if hasattr(self, 'sync_rules_table'):
+            self._refresh_sync_rules()
         if hasattr(self, 's3_table'):
             self._refresh_s3_buckets()
     
@@ -938,10 +1132,13 @@ class SettingsWindow(QDialog):
         self.tasks_list.clear()
         
         # Получаем активные задачи из BackupManager
+        active_tasks = []
         if hasattr(self.backup_manager, 'get_active_tasks'):
-            active_tasks = self.backup_manager.get_active_tasks()
-        else:
-            active_tasks = []
+            active_tasks.extend(self.backup_manager.get_active_tasks())
+        
+        # Получаем активные задачи из SyncManager
+        if self.sync_manager and hasattr(self.sync_manager, 'get_active_tasks'):
+            active_tasks.extend(self.sync_manager.get_active_tasks())
         
         if not active_tasks:
             no_tasks_label = QLabel("(Нет активных задач)")

@@ -147,3 +147,5 @@ config.ini
 *.db
 *.sqlite
 
+# Test scripts with hardcoded credentials
+test_s3_connection.py

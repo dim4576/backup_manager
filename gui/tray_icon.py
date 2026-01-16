@@ -3,20 +3,22 @@
 """
 from PyQt5.QtWidgets import QSystemTrayIcon, QMenu, QApplication, QWidget
 from PyQt5.QtGui import QIcon, QPainter, QColor, QBrush, QPen, QFont, QPixmap
-from PyQt5.QtCore import QSize, Qt, pyqtSignal, QObject
+from PyQt5.QtCore import QSize, Qt, pyqtSignal, QObject, QRect
 from gui.settings_window import SettingsWindow
 from core.backup_manager import BackupManager
 from core.config_manager import ConfigManager
+from core.s3_manager import shutdown_s3_connections
 
 
 class TrayIcon(QObject):
     """Класс для работы с иконкой в системном трее"""
     
-    def __init__(self, backup_manager: BackupManager, config: ConfigManager, parent=None):
+    def __init__(self, backup_manager: BackupManager, config: ConfigManager, parent=None, sync_manager=None):
         """Инициализация иконки в трее"""
         super().__init__(parent)
         self.backup_manager = backup_manager
         self.config = config
+        self.sync_manager = sync_manager
         self.settings_window = None
         self.app = parent  # QApplication
         
@@ -43,31 +45,38 @@ class TrayIcon(QObject):
     
     def _create_icon(self):
         """Создать изображение иконки"""
-        # Создаём pixmap 64x64 с прозрачным фоном
-        pixmap = QPixmap(64, 64)
+        # Создаём pixmap 256x256 для чёткого отображения
+        size = 256
+        pixmap = QPixmap(size, size)
         pixmap.fill(Qt.transparent)
         
         painter = QPainter(pixmap)
         if painter.isActive():
             painter.setRenderHint(QPainter.Antialiasing)
+            painter.setRenderHint(QPainter.TextAntialiasing)
+            painter.setRenderHint(QPainter.SmoothPixmapTransform)
             
-            # Рисуем синий круг
-            brush = QBrush(QColor(0, 100, 200))
-            pen = QPen(QColor(0, 50, 150), 2)
+            # Рисуем синий круг на весь размер с небольшим отступом
+            margin = 8
+            brush = QBrush(QColor(0, 120, 215))  # Windows 10 синий
+            pen = QPen(QColor(0, 80, 180), 6)
             painter.setBrush(brush)
             painter.setPen(pen)
-            painter.drawEllipse(10, 10, 44, 44)
+            painter.drawEllipse(margin, margin, size - margin * 2, size - margin * 2)
             
-            # Рисуем букву "B"
+            # Рисуем букву "B" по центру
             painter.setPen(QPen(QColor(255, 255, 255)))
-            font = QFont("Arial", 24, QFont.Bold)
+            font = QFont("Arial", 140, QFont.Bold)
             painter.setFont(font)
-            painter.drawText(20, 45, "B")
+            
+            # Центрируем текст
+            text_rect = QRect(0, 0, size, size)
+            painter.drawText(text_rect, Qt.AlignCenter, "B")
             
             painter.end()
         else:
             # Если painter не активен, создаём простую цветную иконку
-            pixmap.fill(QColor(0, 100, 200))
+            pixmap.fill(QColor(0, 120, 215))
         
         # Создаём иконку из pixmap
         icon = QIcon(pixmap)
@@ -103,7 +112,7 @@ class TrayIcon(QObject):
         """Показать окно настроек"""
         if self.settings_window is None or not self.settings_window.isVisible():
             # QDialog принимает QWidget или None, а не QApplication
-            self.settings_window = SettingsWindow(None, self.config, self.backup_manager)
+            self.settings_window = SettingsWindow(None, self.config, self.backup_manager, self.sync_manager)
         
         self.settings_window.show()
         self.settings_window.raise_()
@@ -111,7 +120,19 @@ class TrayIcon(QObject):
     
     def _on_exit_clicked(self):
         """Обработчик клика на 'Выход'"""
+        # Останавливаем мониторинг
         self.backup_manager.stop_monitoring()
+        
+        # Останавливаем синхронизацию
+        if self.sync_manager:
+            self.sync_manager.stop()
+        
+        # Закрываем все S3 соединения
+        try:
+            shutdown_s3_connections()
+        except Exception:
+            pass
+        
         self.tray_icon.hide()
         if self.app:
             self.app.quit()

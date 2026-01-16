@@ -38,6 +38,8 @@ def main():
         
         from PyQt5.QtWidgets import QApplication
         from core.backup_manager import BackupManager
+        from core.sync_manager import SyncManager
+        from core.s3_manager import shutdown_s3_connections
         from gui.tray_icon import TrayIcon
         from core.config_manager import ConfigManager
         
@@ -52,10 +54,26 @@ def main():
         config.sync_autostart()
         
         backup_manager = BackupManager(config)
-        tray_icon = TrayIcon(backup_manager, config, app)
+        sync_manager = SyncManager(config)
+        
+        # Запускаем менеджер синхронизации
+        sync_manager.start()
+        
+        tray_icon = TrayIcon(backup_manager, config, app, sync_manager)
         
         # Запускаем цикл событий
-        sys.exit(app.exec_())
+        exit_code = app.exec_()
+        
+        # Останавливаем синхронизацию при выходе
+        sync_manager.stop()
+        
+        # Закрываем все S3 соединения
+        try:
+            shutdown_s3_connections()
+        except Exception:
+            pass
+        
+        sys.exit(exit_code)
         
     except Exception as e:
         error_msg = str(e)
