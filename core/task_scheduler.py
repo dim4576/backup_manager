@@ -45,7 +45,6 @@ def task_exists() -> bool:
         result = subprocess.run(
             ["schtasks", "/Query", "/TN", TASK_NAME],
             capture_output=True,
-            text=True,
             creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
         )
         return result.returncode == 0
@@ -208,7 +207,6 @@ def create_task() -> Tuple[bool, Optional[str]]:
         result = subprocess.run(
             ["schtasks", "/Create", "/TN", TASK_NAME, "/XML", str(xml_path), "/F"],
             capture_output=True,
-            text=True,
             creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
         )
         
@@ -222,7 +220,11 @@ def create_task() -> Tuple[bool, Optional[str]]:
             logger.info(f"Задача '{TASK_NAME}' успешно создана в планировщике")
             return True, None
         else:
-            error = result.stderr or result.stdout
+            # Декодируем вывод с обработкой ошибок
+            try:
+                error = (result.stderr or result.stdout).decode("cp866", errors="replace")
+            except:
+                error = "Неизвестная ошибка"
             logger.error(f"Ошибка создания задачи: {error}")
             return False, error
             
@@ -237,7 +239,6 @@ def delete_task() -> Tuple[bool, Optional[str]]:
         result = subprocess.run(
             ["schtasks", "/Delete", "/TN", TASK_NAME, "/F"],
             capture_output=True,
-            text=True,
             creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
         )
         
@@ -245,7 +246,10 @@ def delete_task() -> Tuple[bool, Optional[str]]:
             logger.info(f"Задача '{TASK_NAME}' удалена из планировщика")
             return True, None
         else:
-            error = result.stderr or result.stdout
+            try:
+                error = (result.stderr or result.stdout).decode("cp866", errors="replace")
+            except:
+                error = "Неизвестная ошибка"
             return False, error
             
     except Exception as e:
