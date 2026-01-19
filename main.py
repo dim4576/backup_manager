@@ -56,6 +56,13 @@ def main():
         # Синхронизируем настройку автозапуска с реестром при старте
         config.sync_autostart()
         
+        # Проверяем/создаём задачу watchdog в планировщике Windows
+        try:
+            from core.task_scheduler import ensure_task_exists
+            ensure_task_exists()
+        except Exception:
+            pass  # Не критично, если не удалось
+        
         backup_manager = BackupManager(config)
         sync_manager = SyncManager(config)
         
