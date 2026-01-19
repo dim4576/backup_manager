@@ -403,27 +403,6 @@ def get_s3_object_metadata(
         return None
 
 
-class UploadProgress:
-    """Класс для отслеживания прогресса загрузки"""
-    
-    def __init__(self, filename: str, total_size: int, callback=None):
-        self.filename = filename
-        self.total_size = total_size
-        self.uploaded = 0
-        self.callback = callback
-    
-    def set_meta(self, object_name=None, total_length=None):
-        """Вызывается при начале загрузки"""
-        if total_length:
-            self.total_size = total_length
-    
-    def update(self, length):
-        """Вызывается при загрузке каждого чанка"""
-        self.uploaded += length
-        if self.callback:
-            self.callback(self.filename, self.uploaded, self.total_size)
-
-
 async def _upload_file_async(
     client: Minio,
     bucket_name: str,
@@ -431,24 +410,25 @@ async def _upload_file_async(
     file_path: str,
     progress_callback=None
 ) -> Tuple[bool, Optional[str]]:
-    """Асинхронная загрузка файла с опциональным прогрессом"""
+    """Асинхронная загрузка файла"""
     try:
-        file_size = os.path.getsize(file_path)
-        progress = None
-        
+        # Уведомляем о начале загрузки
         if progress_callback:
-            progress = UploadProgress(
-                os.path.basename(file_path),
-                file_size,
-                progress_callback
-            )
+            file_size = os.path.getsize(file_path)
+            filename = os.path.basename(file_path)
+            # Вызываем callback с начальным прогрессом
+            progress_callback(filename, 0, file_size)
         
         await client.fput_object(
             bucket_name=bucket_name,
             object_name=object_key,
             file_path=file_path,
-            progress=progress,
         )
+        
+        # Уведомляем о завершении загрузки
+        if progress_callback:
+            progress_callback(filename, file_size, file_size)
+        
         return True, None
     except S3Error as e:
         return False, f"S3 Error: {e.code} - {e.message}"
