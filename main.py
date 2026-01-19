@@ -39,9 +39,12 @@ def main():
         from PyQt5.QtWidgets import QApplication
         from core.backup_manager import BackupManager
         from core.sync_manager import SyncManager
-        from core.s3_manager import shutdown_s3_connections
+        from core.s3_manager import shutdown_s3_connections, clear_all_clients
         from gui.tray_icon import TrayIcon
         from core.config_manager import ConfigManager
+        
+        # Очищаем кэш S3 клиентов при старте
+        clear_all_clients()
         
         # Пытаемся создать QApplication
         app = QApplication(sys.argv)

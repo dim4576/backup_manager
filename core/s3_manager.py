@@ -90,16 +90,25 @@ class _AsyncLoopManager:
         Получить или создать клиент из кэша.
         Один клиент переиспользуется для всех операций с одинаковыми credentials.
         """
+        from core.logger import setup_logger
+        logger = setup_logger("S3Manager")
+        
         if endpoint:
             host, secure = normalize_endpoint(endpoint)
+            logger.debug(f"S3 endpoint: {endpoint} -> host={host}, secure={secure}")
         else:
             host = f"s3.{region}.amazonaws.com"
             secure = True
+            logger.debug(f"S3 AWS endpoint: host={host}, region={region}")
+        
+        if not host:
+            raise ValueError(f"Неверный endpoint: {endpoint}")
         
         client_key = f"{access_key}:{host}:{region}"
         
         with self._clients_lock:
             if client_key not in self._clients:
+                logger.info(f"Создаю S3 клиент для {host}")
                 self._clients[client_key] = Minio(
                     endpoint=host,
                     access_key=access_key,
@@ -154,6 +163,13 @@ _manager = _AsyncLoopManager()
 
 # Регистрируем очистку при выходе
 atexit.register(_manager.shutdown)
+
+
+def clear_all_clients():
+    """Очистить все кэшированные клиенты (вызывать при старте для сброса)"""
+    _manager.shutdown()
+    _manager._initialized = False
+    _manager.__init__()
 
 
 def normalize_endpoint(endpoint: str) -> Tuple[str, bool]:
@@ -240,7 +256,8 @@ async def _check_bucket_async(
         # 3. Скачиваем и проверяем содержимое
         response = await client.get_object(bucket_name, test_key)
         downloaded = await response.read()
-        await response.close()
+        # Закрываем response (close() не корутина, release() - корутина)
+        response.close()
         await response.release()
         
         if downloaded != test_content:
@@ -421,6 +438,11 @@ def upload_file_to_s3(
     Returns:
         Tuple[bool, Optional[str]]: (успех, сообщение_об_ошибке)
     """
+    from core.logger import setup_logger
+    logger = setup_logger("S3Upload")
+    
+    logger.debug(f"upload_file_to_s3: bucket={bucket_name}, region={region}, endpoint={endpoint}")
+    
     if not os.path.exists(file_path):
         return False, f"Файл не найден: {file_path}"
     
@@ -430,8 +452,6 @@ def upload_file_to_s3(
             _upload_file_async(client, bucket_name, object_key, file_path)
         )
     except Exception as e:
-        from core.logger import setup_logger
-        logger = setup_logger()
         logger.error(f"Ошибка при загрузке файла в S3: {e}")
         return False, f"{type(e).__name__}: {str(e)}"
 

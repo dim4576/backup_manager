@@ -14,7 +14,7 @@ from pathlib import Path
 from core.config_manager import ConfigManager
 from core.backup_manager import BackupManager
 from core.logger import get_log_file_path
-from core.s3_manager import check_bucket_availability, normalize_endpoint
+from core.s3_manager import check_bucket_availability
 from gui.widgets import FoldersTreeWidget, RulesTreeWidget
 from gui.rule_dialog import RuleDialog
 from gui.s3_bucket_dialog import S3BucketDialog
@@ -25,10 +25,9 @@ class S3TestWorker(QThread):
     """Рабочий поток для проверки доступности S3 бакета"""
     finished = pyqtSignal(str, str)  # result, details
     
-    def __init__(self, bucket, normalize_endpoint_func):
+    def __init__(self, bucket):
         super().__init__()
         self.bucket = bucket
-        self.normalize_endpoint = normalize_endpoint_func
     
     def run(self):
         """Выполнить проверку доступности в отдельном потоке"""
@@ -49,16 +48,11 @@ class S3TestWorker(QThread):
             region = self.bucket.get("region")
             endpoint = self.bucket.get("endpoint")
             
-            # Нормализуем endpoint
-            if endpoint:
-                if isinstance(endpoint, str) and endpoint.strip():
-                    normalized = self.normalize_endpoint(endpoint)
-                    if normalized and isinstance(normalized, str) and normalized.strip():
-                        endpoint = normalized
-                    else:
-                        endpoint = None
-                else:
-                    endpoint = None
+            # Endpoint передаём как есть - check_bucket_availability сам его нормализует
+            if endpoint and isinstance(endpoint, str):
+                endpoint = endpoint.strip() if endpoint.strip() else None
+            else:
+                endpoint = None
             
             # Устанавливаем регион по умолчанию если не указан
             if region and isinstance(region, str) and region.strip():
@@ -1183,10 +1177,6 @@ class SettingsWindow(QDialog):
         
         return widget
     
-    def _normalize_endpoint(self, endpoint: str) -> str:
-        """Нормализовать endpoint URL - добавить протокол если его нет"""
-        return normalize_endpoint(endpoint)
-    
     def _test_s3_bucket(self, bucket_index: int):
         """Проверить доступность S3 бакета"""
         buckets = self.config.get_s3_buckets()
@@ -1206,7 +1196,7 @@ class SettingsWindow(QDialog):
         progress_dialog.show()
         
         # Создаём и запускаем рабочий поток
-        self.test_worker = S3TestWorker(bucket, self._normalize_endpoint)
+        self.test_worker = S3TestWorker(bucket)
         
         def on_test_finished(result, details):
             """Обработчик завершения проверки"""
