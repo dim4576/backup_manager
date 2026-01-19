@@ -20,7 +20,8 @@ from core.logger import setup_logger
 from core.s3_manager import (
     upload_file_to_s3,
     list_s3_objects,
-    delete_s3_object
+    delete_s3_object,
+    format_size
 )
 
 logger = setup_logger("SyncManager")
@@ -282,19 +283,49 @@ class SyncManager:
             
             # Синхронизируем файлы
             synced_count = 0
+            total_bytes = sum(fp.stat().st_size for fp, _, _ in files_to_sync if fp.exists())
+            uploaded_bytes = 0
+            
             for file_path, s3_key, folder_name in files_to_sync:
                 if not self.running:
                     break
                 
                 try:
-                    # Загружаем файл
+                    file_size = file_path.stat().st_size if file_path.exists() else 0
+                    current_file_name = file_path.name
+                    
+                    # Callback для прогресса текущего файла
+                    def progress_callback(filename, uploaded, total):
+                        nonlocal uploaded_bytes
+                        current_uploaded = uploaded_bytes + uploaded
+                        percent = int(current_uploaded / total_bytes * 100) if total_bytes > 0 else 0
+                        status = f"Загрузка: {filename} ({format_size(uploaded)}/{format_size(total)})"
+                        self._update_task(
+                            task_id, 
+                            progress=percent,
+                            status=status,
+                            current_file=filename,
+                            current_uploaded=uploaded,
+                            current_total=total
+                        )
+                    
+                    # Обновляем статус перед загрузкой
+                    self._update_task(
+                        task_id,
+                        status=f"Загрузка: {current_file_name} (0/{format_size(file_size)})",
+                        current_file=current_file_name
+                    )
+                    
+                    # Загружаем файл с отслеживанием прогресса
                     success, error = upload_file_to_s3(
                         str(file_path), bucket_name, s3_key,
-                        access_key, secret_key, region, endpoint
+                        access_key, secret_key, region, endpoint,
+                        progress_callback=progress_callback
                     )
                     
                     if success:
                         synced_count += 1
+                        uploaded_bytes += file_size
                         logger.debug(f"Загружен: {s3_key}")
                         
                         # Удаляем локальный файл если настроено
@@ -307,7 +338,14 @@ class SyncManager:
                     else:
                         logger.error(f"Ошибка загрузки {s3_key}: {error}")
                     
-                    self._update_task(task_id, processed=synced_count)
+                    # Обновляем общий прогресс
+                    overall_percent = int(uploaded_bytes / total_bytes * 100) if total_bytes > 0 else 0
+                    self._update_task(
+                        task_id, 
+                        processed=synced_count,
+                        progress=overall_percent,
+                        status=f"Загружено {synced_count} из {total_files} файлов ({format_size(uploaded_bytes)}/{format_size(total_bytes)})"
+                    )
                     
                 except Exception as e:
                     logger.error(f"Ошибка синхронизации файла {file_path}: {e}")
@@ -465,12 +503,13 @@ class SyncManager:
                 task = self._active_tasks[task_id]
                 task.update(kwargs)
                 
-                # Пересчитываем прогресс
-                total = task.get("total", 0)
-                processed = task.get("processed", 0)
-                if total > 0:
-                    task["progress"] = int(processed / total * 100)
-                    task["status"] = f"Обработано {processed} из {total} файлов"
+                # Пересчитываем прогресс только если не передан явно
+                if "progress" not in kwargs and "status" not in kwargs:
+                    total = task.get("total", 0)
+                    processed = task.get("processed", 0)
+                    if total > 0:
+                        task["progress"] = int(processed / total * 100)
+                        task["status"] = f"Обработано {processed} из {total} файлов"
     
     def _complete_task(self, task_id: str):
         """Завершить задачу"""

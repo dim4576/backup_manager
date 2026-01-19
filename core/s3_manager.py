@@ -403,18 +403,51 @@ def get_s3_object_metadata(
         return None
 
 
+class UploadProgress:
+    """Класс для отслеживания прогресса загрузки"""
+    
+    def __init__(self, filename: str, total_size: int, callback=None):
+        self.filename = filename
+        self.total_size = total_size
+        self.uploaded = 0
+        self.callback = callback
+    
+    def set_meta(self, object_name=None, total_length=None):
+        """Вызывается при начале загрузки"""
+        if total_length:
+            self.total_size = total_length
+    
+    def update(self, length):
+        """Вызывается при загрузке каждого чанка"""
+        self.uploaded += length
+        if self.callback:
+            self.callback(self.filename, self.uploaded, self.total_size)
+
+
 async def _upload_file_async(
     client: Minio,
     bucket_name: str,
     object_key: str,
-    file_path: str
+    file_path: str,
+    progress_callback=None
 ) -> Tuple[bool, Optional[str]]:
-    """Асинхронная загрузка файла"""
+    """Асинхронная загрузка файла с опциональным прогрессом"""
     try:
+        file_size = os.path.getsize(file_path)
+        progress = None
+        
+        if progress_callback:
+            progress = UploadProgress(
+                os.path.basename(file_path),
+                file_size,
+                progress_callback
+            )
+        
         await client.fput_object(
             bucket_name=bucket_name,
             object_name=object_key,
             file_path=file_path,
+            progress=progress,
         )
         return True, None
     except S3Error as e:
@@ -430,10 +463,14 @@ def upload_file_to_s3(
     access_key: str,
     secret_key: str,
     region: str = 'us-east-1',
-    endpoint: Optional[str] = None
+    endpoint: Optional[str] = None,
+    progress_callback=None
 ) -> Tuple[bool, Optional[str]]:
     """
     Загрузить файл в S3
+    
+    Args:
+        progress_callback: Функция callback(filename, uploaded, total) для отслеживания прогресса
     
     Returns:
         Tuple[bool, Optional[str]]: (успех, сообщение_об_ошибке)
@@ -449,11 +486,23 @@ def upload_file_to_s3(
     try:
         client = create_minio_client(access_key, secret_key, region, endpoint)
         return _manager.run_coroutine(
-            _upload_file_async(client, bucket_name, object_key, file_path)
+            _upload_file_async(client, bucket_name, object_key, file_path, progress_callback)
         )
     except Exception as e:
         logger.error(f"Ошибка при загрузке файла в S3: {e}")
         return False, f"{type(e).__name__}: {str(e)}"
+
+
+def format_size(size_bytes: int) -> str:
+    """Форматировать размер в человекочитаемый вид"""
+    if size_bytes < 1024:
+        return f"{size_bytes} Б"
+    elif size_bytes < 1024 * 1024:
+        return f"{size_bytes / 1024:.1f} КБ"
+    elif size_bytes < 1024 * 1024 * 1024:
+        return f"{size_bytes / (1024 * 1024):.1f} МБ"
+    else:
+        return f"{size_bytes / (1024 * 1024 * 1024):.2f} ГБ"
 
 
 async def _download_file_async(
