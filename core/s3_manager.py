@@ -412,21 +412,42 @@ MAX_PART_RETRIES = 3
 # Задержка между попытками (секунды)
 RETRY_DELAY = 5
 
+# Таймаут для загрузки одной части (секунды)
+# 10 МБ при скорости 1 МБ/с = 10 сек, даём запас до 3 минут
+PART_UPLOAD_TIMEOUT = 180
+
 
 async def _upload_part_with_retry(
     uploader, 
     data: bytes, 
     part_number: int, 
-    max_retries: int = MAX_PART_RETRIES
+    max_retries: int = MAX_PART_RETRIES,
+    timeout: float = PART_UPLOAD_TIMEOUT
 ) -> bool:
-    """Загрузка части с повторными попытками при ошибках"""
+    """Загрузка части с повторными попытками и таймаутом"""
     from core.logger import setup_logger
     logger = setup_logger("S3Upload")
     
     for attempt in range(max_retries):
         try:
-            await uploader.upload_part(data, part_number)
+            # Таймаут для загрузки одной части
+            await asyncio.wait_for(
+                uploader.upload_part(data, part_number),
+                timeout=timeout
+            )
             return True
+        except asyncio.TimeoutError:
+            if attempt < max_retries - 1:
+                logger.warning(
+                    f"Таймаут загрузки части {part_number} ({timeout}с), "
+                    f"попытка {attempt + 1}/{max_retries}"
+                )
+                await asyncio.sleep(RETRY_DELAY)
+            else:
+                logger.error(
+                    f"Не удалось загрузить часть {part_number} после {max_retries} попыток (таймаут)"
+                )
+                raise
         except Exception as e:
             if attempt < max_retries - 1:
                 logger.warning(
@@ -536,15 +557,14 @@ def upload_file_to_s3(
     
     try:
         client = create_minio_client(access_key, secret_key, region, endpoint)
-        
-        # Вычисляем таймаут на основе размера файла
-        # Базовый таймаут 5 минут + 3 минуты на каждые 100 МБ файла
         file_size = os.path.getsize(file_path)
-        base_timeout = 300  # 5 минут
-        size_timeout = (file_size // (100 * 1024 * 1024)) * 180  # +3 минуты на 100 МБ
-        total_timeout = base_timeout + size_timeout
         
-        logger.info(f"Загрузка файла {file_path} ({format_size(file_size)}), таймаут: {total_timeout}с")
+        logger.info(f"Загрузка файла {file_path} ({format_size(file_size)})")
+        
+        # Общий таймаут — страховочный, реальный контроль на уровне частей
+        # Рассчитываем исходя из количества частей * таймаут части * макс попыток + запас
+        num_parts = max(1, (file_size + PART_SIZE - 1) // PART_SIZE)
+        total_timeout = num_parts * PART_UPLOAD_TIMEOUT * MAX_PART_RETRIES + 300
         
         return _manager.run_coroutine(
             _upload_file_async(client, bucket_name, object_key, file_path, progress_callback),
