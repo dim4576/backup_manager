@@ -7,7 +7,6 @@ from PyQt5.QtWidgets import (QDialog, QVBoxLayout, QFormLayout,
 from PyQt5.QtCore import Qt
 from typing import Optional
 from core.config_manager import ConfigManager
-from core.s3_manager import normalize_endpoint
 
 
 class S3BucketDialog(QDialog):
@@ -81,7 +80,15 @@ class S3BucketDialog(QDialog):
     
     def _normalize_endpoint(self, endpoint: str) -> str:
         """Нормализовать endpoint URL - добавить протокол если его нет"""
-        return normalize_endpoint(endpoint)
+        if not endpoint:
+            return ""
+        endpoint = endpoint.strip()
+        if not endpoint:
+            return ""
+        # Добавляем https:// если протокол не указан
+        if not endpoint.startswith("http://") and not endpoint.startswith("https://"):
+            endpoint = f"https://{endpoint}"
+        return endpoint
     
     def _on_show_password_toggled(self, checked):
         """Обработчик переключения показа пароля"""
