@@ -403,8 +403,39 @@ def get_s3_object_metadata(
         return None
 
 
-# Размер части для multipart upload (5 МБ - минимум для S3)
-PART_SIZE = 5 * 1024 * 1024  # 5 MB
+# Размер части для multipart upload (10 МБ - оптимально для стабильности)
+PART_SIZE = 10 * 1024 * 1024  # 10 MB
+
+# Максимальное количество повторных попыток для загрузки части
+MAX_PART_RETRIES = 3
+
+# Задержка между попытками (секунды)
+RETRY_DELAY = 5
+
+
+async def _upload_part_with_retry(
+    uploader, 
+    data: bytes, 
+    part_number: int, 
+    max_retries: int = MAX_PART_RETRIES
+) -> bool:
+    """Загрузка части с повторными попытками при ошибках"""
+    from core.logger import setup_logger
+    logger = setup_logger("S3Upload")
+    
+    for attempt in range(max_retries):
+        try:
+            await uploader.upload_part(data, part_number)
+            return True
+        except Exception as e:
+            if attempt < max_retries - 1:
+                logger.warning(
+                    f"Ошибка загрузки части {part_number}, попытка {attempt + 1}/{max_retries}: {e}"
+                )
+                await asyncio.sleep(RETRY_DELAY)
+            else:
+                logger.error(f"Не удалось загрузить часть {part_number} после {max_retries} попыток: {e}")
+                raise
 
 
 async def _upload_file_async(
@@ -415,6 +446,9 @@ async def _upload_file_async(
     progress_callback=None
 ) -> Tuple[bool, Optional[str]]:
     """Асинхронная загрузка файла с отслеживанием реального прогресса отправки"""
+    from core.logger import setup_logger
+    logger = setup_logger("S3Upload")
+    
     try:
         file_size = os.path.getsize(file_path)
         filename = os.path.basename(file_path)
@@ -428,6 +462,9 @@ async def _upload_file_async(
         if progress_callback and file_size > PART_SIZE:
             uploaded = 0
             part_number = 1
+            total_parts = (file_size + PART_SIZE - 1) // PART_SIZE
+            
+            logger.info(f"Начинаю multipart upload: {filename} ({file_size} байт, {total_parts} частей)")
             
             # Используем встроенный multipart_uploader
             async with client.multipart_uploader(
@@ -440,14 +477,17 @@ async def _upload_file_async(
                         if not data:
                             break
                         
-                        # Загружаем часть на сервер
-                        await uploader.upload_part(data, part_number)
+                        # Загружаем часть на сервер с повторными попытками
+                        await _upload_part_with_retry(uploader, data, part_number)
                         
                         # Обновляем прогресс ПОСЛЕ успешной отправки части
                         uploaded += len(data)
                         progress_callback(filename, uploaded, file_size)
                         
+                        logger.debug(f"Загружена часть {part_number}/{total_parts}")
                         part_number += 1
+            
+            logger.info(f"Multipart upload завершён: {filename}")
         else:
             # Для маленьких файлов или без прогресса используем fput_object
             await client.fput_object(
@@ -496,8 +536,19 @@ def upload_file_to_s3(
     
     try:
         client = create_minio_client(access_key, secret_key, region, endpoint)
+        
+        # Вычисляем таймаут на основе размера файла
+        # Базовый таймаут 5 минут + 3 минуты на каждые 100 МБ файла
+        file_size = os.path.getsize(file_path)
+        base_timeout = 300  # 5 минут
+        size_timeout = (file_size // (100 * 1024 * 1024)) * 180  # +3 минуты на 100 МБ
+        total_timeout = base_timeout + size_timeout
+        
+        logger.info(f"Загрузка файла {file_path} ({format_size(file_size)}), таймаут: {total_timeout}с")
+        
         return _manager.run_coroutine(
-            _upload_file_async(client, bucket_name, object_key, file_path, progress_callback)
+            _upload_file_async(client, bucket_name, object_key, file_path, progress_callback),
+            timeout=total_timeout
         )
     except Exception as e:
         logger.error(f"Ошибка при загрузке файла в S3: {e}")
