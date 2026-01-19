@@ -403,38 +403,8 @@ def get_s3_object_metadata(
         return None
 
 
-class ProgressReader:
-    """Обёртка над файлом для отслеживания прогресса чтения"""
-    
-    def __init__(self, file_path: str, callback=None):
-        self.file_path = file_path
-        self.file_size = os.path.getsize(file_path)
-        self.filename = os.path.basename(file_path)
-        self.callback = callback
-        self.uploaded = 0
-        self._file = None
-    
-    def __enter__(self):
-        self._file = open(self.file_path, 'rb')
-        return self
-    
-    def __exit__(self, *args):
-        if self._file:
-            self._file.close()
-    
-    def read(self, size=-1):
-        data = self._file.read(size)
-        if data:
-            self.uploaded += len(data)
-            if self.callback:
-                self.callback(self.filename, self.uploaded, self.file_size)
-        return data
-    
-    def seek(self, offset, whence=0):
-        return self._file.seek(offset, whence)
-    
-    def tell(self):
-        return self._file.tell()
+# Размер части для multipart upload (5 МБ - минимум для S3)
+PART_SIZE = 5 * 1024 * 1024  # 5 MB
 
 
 async def _upload_file_async(
@@ -444,7 +414,7 @@ async def _upload_file_async(
     file_path: str,
     progress_callback=None
 ) -> Tuple[bool, Optional[str]]:
-    """Асинхронная загрузка файла с отслеживанием прогресса"""
+    """Асинхронная загрузка файла с отслеживанием реального прогресса отправки"""
     try:
         file_size = os.path.getsize(file_path)
         filename = os.path.basename(file_path)
@@ -453,26 +423,42 @@ async def _upload_file_async(
         if progress_callback:
             progress_callback(filename, 0, file_size)
         
-        if progress_callback and file_size > 0:
-            # Используем put_object с ProgressReader для отслеживания прогресса
-            with ProgressReader(file_path, progress_callback) as reader:
-                await client.put_object(
-                    bucket_name=bucket_name,
-                    object_name=object_key,
-                    data=reader,
-                    length=file_size,
-                )
+        # Для больших файлов с callback используем multipart upload
+        # Прогресс обновляется ПОСЛЕ успешной загрузки каждой части на сервер
+        if progress_callback and file_size > PART_SIZE:
+            uploaded = 0
+            part_number = 1
+            
+            # Используем встроенный multipart_uploader
+            async with client.multipart_uploader(
+                bucket_name, 
+                object_key
+            ) as uploader:
+                with open(file_path, 'rb') as f:
+                    while True:
+                        data = f.read(PART_SIZE)
+                        if not data:
+                            break
+                        
+                        # Загружаем часть на сервер
+                        await uploader.upload_part(data, part_number)
+                        
+                        # Обновляем прогресс ПОСЛЕ успешной отправки части
+                        uploaded += len(data)
+                        progress_callback(filename, uploaded, file_size)
+                        
+                        part_number += 1
         else:
-            # Без прогресса используем fput_object (быстрее)
+            # Для маленьких файлов или без прогресса используем fput_object
             await client.fput_object(
                 bucket_name=bucket_name,
                 object_name=object_key,
                 file_path=file_path,
             )
-        
-        # Уведомляем о завершении загрузки
-        if progress_callback:
-            progress_callback(filename, file_size, file_size)
+            
+            # Уведомляем о завершении
+            if progress_callback:
+                progress_callback(filename, file_size, file_size)
         
         return True, None
     except S3Error as e:
