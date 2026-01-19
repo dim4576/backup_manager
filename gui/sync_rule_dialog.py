@@ -533,6 +533,23 @@ class SyncRuleDialog(QDialog):
             QMessageBox.warning(self, "Ошибка", "Выберите хотя бы один день недели для расписания")
             return
         
+        # Определяем last_sync для нового правила
+        # Для режима "по расписанию" устанавливаем текущее время,
+        # чтобы синхронизация не запустилась сразу при создании
+        if self.is_new:
+            if schedule_type == "schedule":
+                from datetime import datetime, timezone
+                last_sync = datetime.now(timezone.utc).isoformat()
+            else:
+                last_sync = None
+        else:
+            # При редактировании сохраняем предыдущее значение
+            rules = self.config.get_sync_rules()
+            if self.rule_index < len(rules):
+                last_sync = rules[self.rule_index].get("last_sync")
+            else:
+                last_sync = None
+        
         # Формируем правило
         rule = {
             "name": name,
@@ -550,7 +567,7 @@ class SyncRuleDialog(QDialog):
             "sync_deletions": self.sync_deletions_check.isChecked(),
             "pattern": self.pattern_edit.text().strip() or "*",
             "pattern_type": self.pattern_type_combo.currentText(),
-            "last_sync": None  # Время последней синхронизации
+            "last_sync": last_sync
         }
         
         # Сохраняем

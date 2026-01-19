@@ -177,6 +177,16 @@ class SyncManager:
         if now_local < scheduled_today:
             return False
         
+        # Окно запуска: синхронизация запускается только в течение 5 минут после запланированного времени
+        # Это предотвращает запуск при создании правила, если текущее время далеко после расписания
+        from datetime import timedelta
+        schedule_window_end = scheduled_today + timedelta(minutes=5)
+        
+        # Если текущее время вне окна запуска и last_sync не задан - не запускаем
+        # (правило скорее всего только создано)
+        if now_local > schedule_window_end and last_sync is None:
+            return False
+        
         # Проверяем: не было ли синхронизации после запланированного времени сегодня?
         if last_sync:
             # Конвертируем в локальное время если нужно
