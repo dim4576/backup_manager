@@ -403,6 +403,40 @@ def get_s3_object_metadata(
         return None
 
 
+class ProgressReader:
+    """Обёртка над файлом для отслеживания прогресса чтения"""
+    
+    def __init__(self, file_path: str, callback=None):
+        self.file_path = file_path
+        self.file_size = os.path.getsize(file_path)
+        self.filename = os.path.basename(file_path)
+        self.callback = callback
+        self.uploaded = 0
+        self._file = None
+    
+    def __enter__(self):
+        self._file = open(self.file_path, 'rb')
+        return self
+    
+    def __exit__(self, *args):
+        if self._file:
+            self._file.close()
+    
+    def read(self, size=-1):
+        data = self._file.read(size)
+        if data:
+            self.uploaded += len(data)
+            if self.callback:
+                self.callback(self.filename, self.uploaded, self.file_size)
+        return data
+    
+    def seek(self, offset, whence=0):
+        return self._file.seek(offset, whence)
+    
+    def tell(self):
+        return self._file.tell()
+
+
 async def _upload_file_async(
     client: Minio,
     bucket_name: str,
@@ -410,20 +444,31 @@ async def _upload_file_async(
     file_path: str,
     progress_callback=None
 ) -> Tuple[bool, Optional[str]]:
-    """Асинхронная загрузка файла"""
+    """Асинхронная загрузка файла с отслеживанием прогресса"""
     try:
+        file_size = os.path.getsize(file_path)
+        filename = os.path.basename(file_path)
+        
         # Уведомляем о начале загрузки
         if progress_callback:
-            file_size = os.path.getsize(file_path)
-            filename = os.path.basename(file_path)
-            # Вызываем callback с начальным прогрессом
             progress_callback(filename, 0, file_size)
         
-        await client.fput_object(
-            bucket_name=bucket_name,
-            object_name=object_key,
-            file_path=file_path,
-        )
+        if progress_callback and file_size > 0:
+            # Используем put_object с ProgressReader для отслеживания прогресса
+            with ProgressReader(file_path, progress_callback) as reader:
+                await client.put_object(
+                    bucket_name=bucket_name,
+                    object_name=object_key,
+                    data=reader,
+                    length=file_size,
+                )
+        else:
+            # Без прогресса используем fput_object (быстрее)
+            await client.fput_object(
+                bucket_name=bucket_name,
+                object_name=object_key,
+                file_path=file_path,
+            )
         
         # Уведомляем о завершении загрузки
         if progress_callback:
